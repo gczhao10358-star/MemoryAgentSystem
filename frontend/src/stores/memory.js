@@ -14,7 +14,7 @@ export const useMemoryStore = defineStore('memory', () => {
     try {
       const response = await axios.get(`/api/users/${userStore.userId}/memories?limit=100`)
       if (response.data.success) {
-        memories.value = response.data.data
+        memories.value = (response.data.data || []).filter(memory => memory.memory_type !== 'chat')
       }
     } catch (error) {
       console.error('加载记忆失败:', error)

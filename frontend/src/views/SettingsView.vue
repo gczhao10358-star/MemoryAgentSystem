@@ -1,6 +1,17 @@
 <template>
   <div class="settings-container">
-    <h1>设置</h1>
+    <div class="view-header">
+      <div>
+        <h1>设置</h1>
+        <p class="page-subtitle">管理平台集成和外部提醒渠道。</p>
+      </div>
+      <div class="status-summary">
+        <span class="summary-label">飞书状态</span>
+        <span :class="['status-badge', larkStatus.enabled ? 'enabled' : 'disabled']">
+          {{ larkStatus.enabled ? '已启用' : '未配置' }}
+        </span>
+      </div>
+    </div>
 
     <!-- 飞书配置 -->
     <div class="setting-section">
@@ -138,9 +149,10 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useUserStore } from '@/stores/user'
 
-const userId = localStorage.getItem('memorymate_user_id') || 'test'
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const userStore = useUserStore()
 
 // 状态
 const larkStatus = ref({ enabled: false })
@@ -159,8 +171,11 @@ const larkConfig = ref({
 
 // 获取平台状态
 async function loadPlatformStatus() {
+  if (!userStore.userId) {
+    return
+  }
   try {
-    const res = await fetch(`${API_URL}/api/platform/status?user_id=${userId}`)
+    const res = await fetch(`${API_URL}/api/platform/status?user_id=${userStore.userId}`)
     const data = await res.json()
 
     if (data.success) {
@@ -178,6 +193,11 @@ async function loadPlatformStatus() {
 
 // 保存配置
 async function saveLarkConfig() {
+  if (!userStore.userId) {
+    ElMessage.error('用户未登录')
+    return
+  }
+
   // 验证
   if (!larkConfig.value.app_id || !larkConfig.value.app_secret || !larkConfig.value.receive_id) {
     ElMessage.error('请填写所有必填项')
@@ -192,7 +212,7 @@ async function saveLarkConfig() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        user_id: userId,
+        user_id: userStore.userId,
         ...larkConfig.value
       })
     })
@@ -215,6 +235,11 @@ async function saveLarkConfig() {
 
 // 测试连接
 async function testLark() {
+  if (!userStore.userId) {
+    ElMessage.error('用户未登录')
+    return
+  }
+
   testing.value = true
   testResult.value = null
 
@@ -223,7 +248,7 @@ async function testLark() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        user_id: userId,
+        user_id: userStore.userId,
         content: '这是一条测试消息，来自智忆助理！'
       })
     })
@@ -246,12 +271,17 @@ async function testLark() {
 
 // 删除配置
 async function deleteLarkConfig() {
+  if (!userStore.userId) {
+    ElMessage.error('用户未登录')
+    return
+  }
+
   try {
     await ElMessageBox.confirm('确定要删除飞书配置吗？', '确认删除', {
       type: 'warning'
     })
 
-    const res = await fetch(`${API_URL}/api/platform/lark/config?user_id=${userId}`, {
+    const res = await fetch(`${API_URL}/api/platform/lark/config?user_id=${userStore.userId}`, {
       method: 'DELETE'
     })
 
@@ -292,22 +322,59 @@ onMounted(() => {
 
 <style scoped>
 .settings-container {
-  max-width: 800px;
+  height: 100%;
+  overflow-y: auto;
+  max-width: 1080px;
   margin: 0 auto;
   padding: 20px;
+  background:
+    radial-gradient(circle at top left, rgba(34, 211, 238, 0.08), transparent 22%),
+    linear-gradient(180deg, #07111f 0%, #0b1324 50%, #0a1423 100%);
 }
 
 h1 {
-  margin-bottom: 30px;
-  color: #333;
+  margin: 0;
+  color: #eef6ff;
+}
+
+.view-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 22px;
+  border: 1px solid rgba(127, 156, 191, 0.14);
+  border-radius: 24px;
+  background: rgba(8, 18, 34, 0.78);
+  box-shadow: 0 18px 40px rgba(2, 6, 23, 0.18);
+  backdrop-filter: blur(18px);
+  margin-bottom: 18px;
+}
+
+.page-subtitle {
+  margin-top: 6px;
+  color: #8ea3bf;
+}
+
+.status-summary {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.summary-label {
+  color: #7f93ad;
+  font-size: 12px;
 }
 
 .setting-section {
-  background: white;
-  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(13, 24, 40, 0.92) 0%, rgba(10, 19, 33, 0.88) 100%);
+  border: 1px solid rgba(127, 156, 191, 0.14);
+  border-radius: 24px;
   padding: 24px;
   margin-bottom: 20px;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  box-shadow: 0 18px 36px rgba(2, 6, 23, 0.14);
 }
 
 .section-header {
@@ -319,33 +386,34 @@ h1 {
 
 .section-header h2 {
   margin: 0;
-  color: #333;
+  color: #eef6ff;
 }
 
 .status-badge {
-  padding: 4px 12px;
-  border-radius: 12px;
+  padding: 6px 12px;
+  border-radius: 999px;
   font-size: 12px;
   font-weight: bold;
 }
 
 .status-badge.enabled {
-  background: #e6f7e6;
-  color: #52c41a;
+  background: rgba(45, 212, 191, 0.12);
+  color: #8cf3e3;
 }
 
 .status-badge.disabled {
-  background: #f5f5f5;
-  color: #999;
+  background: rgba(127, 156, 191, 0.12);
+  color: #a8bfd9;
 }
 
 .description {
-  color: #666;
+  color: #9db0c8;
   margin-bottom: 20px;
+  line-height: 1.7;
 }
 
 .description a {
-  color: #1890ff;
+  color: #67d2fb;
 }
 
 .config-form {
@@ -360,7 +428,7 @@ h1 {
   display: block;
   margin-bottom: 8px;
   font-weight: 500;
-  color: #333;
+  color: #e7f2fd;
 }
 
 .form-group .required {
@@ -371,22 +439,24 @@ h1 {
 .form-group select {
   width: 100%;
   padding: 10px 12px;
-  border: 1px solid #d9d9d9;
-  border-radius: 4px;
+  border: 1px solid rgba(127, 156, 191, 0.14);
+  border-radius: 12px;
   font-size: 14px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #eef6ff;
 }
 
 .form-group input:focus,
 .form-group select:focus {
   outline: none;
-  border-color: #1890ff;
+  border-color: #38bdf8;
 }
 
 .form-group .help {
   display: block;
   margin-top: 4px;
   font-size: 12px;
-  color: #999;
+  color: #7f93ad;
 }
 
 .form-actions {
@@ -396,9 +466,9 @@ h1 {
 }
 
 .config-display {
-  background: #f6ffed;
-  border: 1px solid #b7eb8f;
-  border-radius: 4px;
+  background: rgba(14, 28, 42, 0.7);
+  border: 1px solid rgba(94, 234, 212, 0.14);
+  border-radius: 18px;
   padding: 20px;
 }
 
@@ -409,11 +479,11 @@ h1 {
 
 .info-row .label {
   width: 100px;
-  color: #666;
+  color: #8ea3bf;
 }
 
 .info-row .value {
-  color: #333;
+  color: #eef6ff;
   font-weight: 500;
 }
 
@@ -425,8 +495,8 @@ h1 {
 
 button {
   padding: 10px 20px;
-  border: none;
-  border-radius: 4px;
+  border: 1px solid transparent;
+  border-radius: 12px;
   cursor: pointer;
   font-size: 14px;
   transition: all 0.3s;
@@ -438,60 +508,60 @@ button:disabled {
 }
 
 .btn-primary {
-  background: #1890ff;
+  background: linear-gradient(135deg, #38bdf8, #0ea5e9);
   color: white;
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: #40a9ff;
+  transform: translateY(-1px);
 }
 
 .btn-secondary {
-  background: white;
-  color: #666;
-  border: 1px solid #d9d9d9;
+  background: rgba(15, 23, 42, 0.72);
+  color: #cfe0f2;
+  border-color: rgba(127, 156, 191, 0.14);
 }
 
 .btn-secondary:hover {
-  color: #1890ff;
-  border-color: #1890ff;
+  color: #67d2fb;
+  border-color: rgba(103, 210, 251, 0.36);
 }
 
 .btn-danger {
-  background: white;
-  color: #ff4d4f;
-  border: 1px solid #ff4d4f;
+  background: rgba(15, 23, 42, 0.72);
+  color: #fb7185;
+  border-color: rgba(251, 113, 133, 0.4);
 }
 
 .btn-danger:hover {
-  background: #ff4d4f;
-  color: white;
+  background: rgba(251, 113, 133, 0.12);
 }
 
 .test-result {
   margin-top: 16px;
   padding: 12px;
-  border-radius: 4px;
+  border-radius: 12px;
 }
 
 .test-result.success {
-  background: #f6ffed;
-  color: #52c41a;
-  border: 1px solid #b7eb8f;
+  background: rgba(45, 212, 191, 0.08);
+  color: #8cf3e3;
+  border: 1px solid rgba(94, 234, 212, 0.24);
 }
 
 .test-result.error {
-  background: #fff2f0;
-  color: #ff4d4f;
-  border: 1px solid #ffccc7;
+  background: rgba(251, 113, 133, 0.08);
+  color: #fda4af;
+  border: 1px solid rgba(251, 113, 133, 0.24);
 }
 
 .help-content {
-  color: #666;
+  color: #9db0c8;
+  line-height: 1.7;
 }
 
 .help-content h4 {
-  color: #333;
+  color: #eef6ff;
   margin-bottom: 12px;
 }
 
@@ -506,5 +576,25 @@ button:disabled {
 .help-content ul {
   margin-top: 4px;
   padding-left: 20px;
+}
+
+@media (max-width: 960px) {
+  .settings-container {
+    padding: 12px;
+  }
+
+  .view-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .status-summary {
+    align-items: flex-start;
+  }
+
+  .config-actions,
+  .form-actions {
+    flex-direction: column;
+  }
 }
 </style>

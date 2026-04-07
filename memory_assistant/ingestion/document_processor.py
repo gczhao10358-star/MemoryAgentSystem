@@ -3,6 +3,7 @@
 整合整个ETL流水线
 """
 import os
+import re
 from typing import AsyncGenerator, Dict, Any, Optional, List
 from datetime import datetime
 
@@ -19,6 +20,7 @@ class DocumentProcessor:
     处理流水线：
     1. 文件加载 -> 2. 内容提取 -> 3. 语义切片 -> 4. LLM分析 -> 5. 结果存储
     """
+    ANALYSIS_VERSION = "meeting-analysis-v2"
 
     def __init__(
         self,
@@ -208,8 +210,16 @@ class DocumentProcessor:
                 await document_store.update_status(
                     document_id=document_id,
                     status="completed",
-                    analysis_result=final_result.analysis.to_dict() if final_result.analysis else None
+                    analysis_result=final_result.analysis.to_dict() if final_result.analysis else None,
+                    metadata_updates={"analysis_version": self.ANALYSIS_VERSION},
                 )
+
+            await self.persist_analysis_completion_message(
+                user_id=user_id,
+                session_id=metadata.get("session_id"),
+                document_id=document_id,
+                analysis_result=final_result.analysis,
+            )
 
             yield {
                 "stage": "completed",
@@ -239,6 +249,53 @@ class DocumentProcessor:
                 "data": {"error": str(e)},
                 "status": "error"
             }
+
+    async def persist_analysis_completion_message(
+        self,
+        user_id: str,
+        session_id: Optional[str],
+        document_id: str,
+        analysis_result,
+    ) -> None:
+        """将会议解析完成消息持久化到目标会话。"""
+        if not session_id or not analysis_result:
+            return
+
+        content = self.build_analysis_completion_message(analysis_result)
+        safe_session_id = re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)
+        await self.agent.memory_service.record_session_turn(
+            user_id=user_id,
+            session_id=session_id,
+            role="assistant",
+            content=content,
+            turn_id=f"doc_analysis_{document_id}",
+            message_id=f"msg_doc_analysis_{document_id}_{safe_session_id}",
+        )
+
+    def build_analysis_completion_message(self, analysis_result) -> str:
+        """构造展示在会话历史中的会议解析完成消息。"""
+        if hasattr(analysis_result, "to_dict"):
+            result = analysis_result.to_dict()
+        else:
+            result = analysis_result or {}
+
+        meeting_title = result.get("meeting_title") or "未识别"
+        summary = (result.get("summary") or "").strip()
+        if len(summary) > 200:
+            summary = summary[:200].rstrip() + "..."
+        if not summary:
+            summary = "暂无摘要"
+
+        action_count = len(result.get("action_items") or [])
+        decision_count = len(result.get("key_decisions") or [])
+
+        return (
+            "📄 会议记录解析完成！\n\n"
+            f"**主题：** {meeting_title}\n\n"
+            f"**摘要：** {summary}\n\n"
+            f"**提取结果：** {decision_count} 条关键决策，{action_count} 条待办事项\n\n"
+            '> 点击上方"查看分析结果"按钮查看详情'
+        )
 
     async def confirm_action_items(
         self,

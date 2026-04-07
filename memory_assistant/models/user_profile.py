@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
 import math
 
+from ..utils.topic_utils import is_meaningful_topic, normalize_topic, sanitize_topic_preferences
+
 
 @dataclass
 class TopicPreference:
@@ -102,6 +104,8 @@ class BehaviorStatistics:
 class UserProfile:
     """用户画像主类"""
     user_id: str
+    username: Optional[str] = None
+    name: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
 
@@ -127,6 +131,10 @@ class UserProfile:
 
     def add_or_update_topic(self, topic: str, interaction_signal: float = 0.5):
         """添加或更新话题偏好"""
+        topic = normalize_topic(topic)
+        if not is_meaningful_topic(topic):
+            return
+
         pref = self.get_topic_preference(topic)
         if pref:
             pref.update_weight(interaction_signal)
@@ -134,8 +142,10 @@ class UserProfile:
             self.topic_preferences.append(TopicPreference(
                 topic=topic,
                 weight=interaction_signal,
-                confidence=0.3
+                confidence=0.3,
+                interaction_count=1
             ))
+        self.topic_preferences = sanitize_topic_preferences(self.topic_preferences)
         self.updated_at = datetime.now()
 
     def update_behavior_stats(self, interaction_type: str = "query"):
@@ -150,6 +160,8 @@ class UserProfile:
         """转换为字典"""
         return {
             'user_id': self.user_id,
+            'username': self.username,
+            'name': self.name,
             'created_at': self.created_at.isoformat(),
             'updated_at': self.updated_at.isoformat(),
             'topic_preferences': [
@@ -173,6 +185,8 @@ class UserProfile:
                 'total_interactions': self.behavior_stats.total_interactions,
                 'total_queries': self.behavior_stats.total_queries,
                 'total_memories_created': self.behavior_stats.total_memories_created,
+                'last_interaction': self.behavior_stats.last_interaction.isoformat()
+                if self.behavior_stats.last_interaction else None,
             },
             'expertise_areas': [
                 {
@@ -188,7 +202,11 @@ class UserProfile:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'UserProfile':
         """从字典创建"""
-        profile = cls(user_id=data['user_id'])
+        profile = cls(
+            user_id=data['user_id'],
+            username=data.get('username'),
+            name=data.get('name'),
+        )
 
         # 解析话题偏好
         for tp_data in data.get('topic_preferences', []):
@@ -217,6 +235,13 @@ class UserProfile:
             total_queries=stats_data.get('total_queries', 0),
             total_memories_created=stats_data.get('total_memories_created', 0),
         )
+        if stats_data.get('last_interaction'):
+            try:
+                profile.behavior_stats.last_interaction = datetime.fromisoformat(
+                    stats_data['last_interaction']
+                )
+            except Exception:
+                profile.behavior_stats.last_interaction = None
 
         # 解析专业领域
         for exp_data in data.get('expertise_areas', []):

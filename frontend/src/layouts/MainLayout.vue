@@ -1,18 +1,32 @@
 <template>
   <el-container class="main-layout">
-    <el-aside width="260px" class="sidebar">
+    <el-aside :width="sidebarWidth" :class="['sidebar', { collapsed: sidebarCollapsed }]">
       <div class="sidebar-header">
-        <el-icon size="28" color="#6366f1"><Cpu /></el-icon>
-        <span class="title">智忆助理</span>
+        <div class="brand-mark">
+          <el-icon size="24"><Cpu /></el-icon>
+        </div>
+        <div v-if="!sidebarCollapsed" class="brand-copy">
+          <span class="title">智忆助理</span>
+          <span class="subtitle">Memory workspace</span>
+        </div>
+        <el-button
+          text
+          circle
+          class="collapse-button"
+          :title="sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'"
+          @click="toggleSidebar"
+        >
+          <el-icon><component :is="sidebarCollapsed ? Expand : Fold" /></el-icon>
+        </el-button>
       </div>
 
       <div class="user-info">
-        <el-avatar :size="48" class="user-avatar">
+        <el-avatar :size="50" class="user-avatar">
           <el-icon><UserFilled /></el-icon>
         </el-avatar>
-        <div class="user-details">
-          <span class="username">{{ userStore.username }}</span>
-          <span class="user-id">ID: {{ userStore.userId.slice(0, 8) }}</span>
+        <div v-if="!sidebarCollapsed" class="user-details">
+          <span class="username">{{ userStore.displayName || userStore.username }}</span>
+          <span class="user-id">ID {{ userStore.userId.slice(0, 8) }}</span>
         </div>
       </div>
 
@@ -24,29 +38,34 @@
         text-color="#94a3b8"
         active-text-color="#6366f1"
       >
-        <el-menu-item v-for="item in menuItems" :key="item.path" :index="item.path">
+        <el-menu-item
+          v-for="item in menuItems"
+          :key="item.path"
+          :index="item.path"
+          :title="sidebarCollapsed ? item.title : undefined"
+        >
           <el-icon>
             <component :is="item.icon" />
           </el-icon>
-          <span>{{ item.title }}</span>
+          <span v-if="!sidebarCollapsed">{{ item.title }}</span>
         </el-menu-item>
       </el-menu>
 
       <div class="sidebar-footer">
         <div class="current-time" v-if="currentTime">
           <el-icon><Clock /></el-icon>
-          <div class="time-info">
+          <div v-if="!sidebarCollapsed" class="time-info">
             <span class="date">{{ currentTime.date }}</span>
             <span class="weekday">{{ currentTime.weekday_name }} {{ currentTime.time }}</span>
           </div>
         </div>
-        <el-button type="info" plain @click="handleClearChat">
+        <el-button type="info" plain :title="sidebarCollapsed ? '清空对话' : undefined" @click="handleClearChat">
           <el-icon><Delete /></el-icon>
-          清空对话
+          <span v-if="!sidebarCollapsed">清空对话</span>
         </el-button>
-        <el-button type="danger" text @click="handleLogout">
+        <el-button type="danger" text :title="sidebarCollapsed ? '退出' : undefined" @click="handleLogout">
           <el-icon><SwitchButton /></el-icon>
-          退出
+          <span v-if="!sidebarCollapsed">退出</span>
         </el-button>
       </div>
     </el-aside>
@@ -61,7 +80,7 @@
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
-import { Cpu, UserFilled, Delete, SwitchButton, Clock } from '@element-plus/icons-vue'
+import { Cpu, UserFilled, Delete, SwitchButton, Clock, Fold, Expand } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import { useChatStore } from '@/stores/chat'
 import axios from 'axios'
@@ -74,24 +93,71 @@ const router = useRouter()
 const userStore = useUserStore()
 const chatStore = useChatStore()
 const currentTime = ref(null)
-let timeTimer = null
+const SIDEBAR_KEY = 'memorymate_sidebar_collapsed'
+const sidebarCollapsed = ref(localStorage.getItem(SIDEBAR_KEY) === '1')
+const sidebarWidth = computed(() => (sidebarCollapsed.value ? '92px' : '228px'))
+let timeTickTimer = null
+let timeSyncTimer = null
+let serverNowBaseMs = null
+let serverNowFetchedAtMs = null
+
+function toggleSidebar() {
+  sidebarCollapsed.value = !sidebarCollapsed.value
+  localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed.value ? '1' : '0')
+}
+
+function formatCurrentTime(now) {
+  const weekdayNames = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+  const pad = (value) => String(value).padStart(2, '0')
+
+  return {
+    iso: now.toISOString(),
+    date: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
+    time: `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`,
+    year: now.getFullYear(),
+    month: now.getMonth() + 1,
+    day: now.getDate(),
+    hour: now.getHours(),
+    minute: now.getMinutes(),
+    weekday: now.getDay() === 0 ? 6 : now.getDay() - 1,
+    weekday_name: weekdayNames[now.getDay() === 0 ? 6 : now.getDay() - 1]
+  }
+}
+
+function updateDisplayedTime() {
+  if (serverNowBaseMs == null || serverNowFetchedAtMs == null) {
+    currentTime.value = formatCurrentTime(new Date())
+    return
+  }
+
+  const elapsedMs = Date.now() - serverNowFetchedAtMs
+  currentTime.value = formatCurrentTime(new Date(serverNowBaseMs + elapsedMs))
+}
 
 // 获取当前时间
 async function fetchCurrentTime() {
   try {
     const { data } = await axios.get('/api/now')
     if (data.success) {
-      currentTime.value = data.data
+      serverNowBaseMs = Date.parse(data.data.iso)
+      serverNowFetchedAtMs = Date.now()
+      updateDisplayedTime()
     }
   } catch (e) {
     console.error('Failed to fetch current time:', e)
+    if (!currentTime.value) {
+      updateDisplayedTime()
+    }
   }
 }
 
 onMounted(() => {
+  userStore.hydrateUser()
   fetchCurrentTime()
-  // 每分钟刷新一次时间
-  timeTimer = setInterval(fetchCurrentTime, 60000)
+  // 本地每秒刷新显示，保证秒级实时变化
+  timeTickTimer = setInterval(updateDisplayedTime, 1000)
+  // 定期和后端校准一次，避免长时间运行产生漂移
+  timeSyncTimer = setInterval(fetchCurrentTime, 60000)
   // 延迟连接WebSocket，确保用户状态已加载
   setTimeout(() => {
     connectReminderWebSocket()
@@ -99,8 +165,11 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  if (timeTimer) {
-    clearInterval(timeTimer)
+  if (timeTickTimer) {
+    clearInterval(timeTickTimer)
+  }
+  if (timeSyncTimer) {
+    clearInterval(timeSyncTimer)
   }
   // 断开WebSocket
   disconnectReminderWebSocket()
@@ -171,15 +240,6 @@ function connectReminderWebSocket() {
             console.log('[WebSocket] 用户点击了提醒通知')
           }
         })
-        // 同时在聊天中添加一条系统消息（如果存在chatStore）
-        if (chatStore && chatStore.messages) {
-          chatStore.messages.push({
-            id: Date.now(),
-            role: 'assistant',
-            content: `⏰ **提醒**\n\n${data.content}\n\n*${data.is_offline_message ? '（这是您离线期间的提醒）' : ''}*`,
-            time: new Date().toLocaleTimeString()
-          })
-        }
       }
     } catch (e) {
       console.error('[WebSocket] 解析消息失败:', e)
@@ -251,8 +311,10 @@ async function handleLogout() {
       cancelButtonText: '取消',
       type: 'warning'
     })
+    disconnectReminderWebSocket()
+    chatStore.resetState()
     userStore.logout()
-    router.push('/login')
+    await router.replace('/login')
     ElMessage.success('已退出登录')
   } catch {
     // 用户取消
@@ -263,97 +325,186 @@ async function handleLogout() {
 <style scoped lang="scss">
 .main-layout {
   height: 100vh;
-  background: #0f172a;
+  background:
+    radial-gradient(circle at top left, rgba(34, 211, 238, 0.08), transparent 22%),
+    linear-gradient(180deg, #08111e 0%, #0b1424 52%, #0a1321 100%);
 }
 
 .sidebar {
-  background: #1e293b;
-  border-right: 1px solid #334155;
+  background: linear-gradient(180deg, rgba(10, 18, 31, 0.96) 0%, rgba(11, 20, 35, 0.94) 100%);
+  border-right: 1px solid rgba(127, 156, 191, 0.14);
   display: flex;
   flex-direction: column;
-}
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.03);
+  transition: width 0.24s ease;
 
-.sidebar-header {
-  padding: 20px;
-  border-bottom: 1px solid #334155;
-  display: flex;
-  align-items: center;
-  gap: 12px;
+  &.collapsed {
+    .sidebar-header {
+      justify-content: center;
+      padding-inline: 12px;
+    }
 
-  .title {
-    font-size: 20px;
-    font-weight: 700;
-    color: #f1f5f9;
+    .user-info {
+      justify-content: center;
+      padding-inline: 0;
+    }
+
+    .sidebar-menu {
+      padding-inline: 10px;
+    }
+
+    .sidebar-footer {
+      align-items: center;
+    }
+
+    .current-time {
+      justify-content: center;
+      width: 52px;
+      padding: 12px 0;
+    }
+
+    :deep(.el-menu-item) {
+      justify-content: center;
+      padding: 0 !important;
+    }
+
+    .sidebar-footer .el-button {
+      width: 52px;
+      justify-content: center;
+      padding: 0;
+    }
   }
 }
 
-.user-info {
-  padding: 20px;
+.sidebar-header {
+  padding: 24px 20px 18px;
+  border-bottom: 1px solid rgba(127, 156, 191, 0.12);
   display: flex;
   align-items: center;
   gap: 12px;
-  border-bottom: 1px solid #334155;
+}
+
+.brand-mark {
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, rgba(34, 211, 238, 0.18), rgba(14, 165, 233, 0.2));
+  color: #67e8f9;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.brand-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.title {
+  font-size: 18px;
+  font-weight: 700;
+  color: #f4f8ff;
+}
+
+.subtitle {
+  margin-top: 2px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #6f88a7;
+}
+
+.collapse-button {
+  margin-left: auto;
+  color: #8fb0cf;
+}
+
+.user-info {
+  margin: 16px 16px 0;
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid rgba(127, 156, 191, 0.12);
+  border-radius: 20px;
+  background: linear-gradient(180deg, rgba(16, 28, 45, 0.92) 0%, rgba(10, 20, 35, 0.9) 100%);
 }
 
 .user-avatar {
-  background: linear-gradient(135deg, #6366f1, #a855f7);
+  background: linear-gradient(135deg, #38bdf8, #0ea5e9);
 }
 
 .user-details {
   display: flex;
   flex-direction: column;
+  min-width: 0;
 
   .username {
     font-weight: 600;
     font-size: 15px;
-    color: #f1f5f9;
+    color: #f4f8ff;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .user-id {
     font-size: 12px;
-    color: #64748b;
+    color: #6f88a7;
   }
 }
 
 .sidebar-menu {
   flex: 1;
   border-right: none;
-  padding: 16px 12px;
+  padding: 18px 12px 14px;
 
   :deep(.el-menu-item) {
-    border-radius: 8px;
-    margin-bottom: 4px;
+    height: 48px;
+    border-radius: 14px;
+    margin-bottom: 6px;
+    color: #9fb5cf !important;
 
     &:hover {
-      background: rgba(51, 65, 85, 0.5);
+      background: rgba(17, 31, 50, 0.88) !important;
     }
 
     &.is-active {
-      background: rgba(99, 102, 241, 0.15);
+      background: linear-gradient(90deg, rgba(94, 234, 212, 0.14), rgba(56, 189, 248, 0.12)) !important;
+      color: #e8f7ff !important;
+      box-shadow: inset 0 0 0 1px rgba(94, 234, 212, 0.16);
     }
+  }
+
+  :deep(.el-menu-item .el-icon) {
+    color: inherit;
   }
 }
 
 .sidebar-footer {
   padding: 16px;
-  border-top: 1px solid #334155;
+  border-top: 1px solid rgba(127, 156, 191, 0.12);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 
   .el-button {
     justify-content: flex-start;
+    border-radius: 14px;
   }
 
   .current-time {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 12px;
-    background: rgba(99, 102, 241, 0.1);
-    border-radius: 8px;
-    margin-bottom: 8px;
-    color: #6366f1;
+    padding: 14px;
+    background: linear-gradient(180deg, rgba(17, 31, 50, 0.96) 0%, rgba(12, 23, 39, 0.92) 100%);
+    border: 1px solid rgba(127, 156, 191, 0.12);
+    border-radius: 18px;
+    margin-bottom: 4px;
+    color: #67e8f9;
 
     .el-icon {
       font-size: 20px;
@@ -367,12 +518,12 @@ async function handleLogout() {
       .date {
         font-size: 13px;
         font-weight: 600;
-        color: #f1f5f9;
+        color: #f4f8ff;
       }
 
       .weekday {
         font-size: 11px;
-        color: #94a3b8;
+        color: #83a0bf;
       }
     }
   }
@@ -381,5 +532,6 @@ async function handleLogout() {
 .main-content {
   padding: 0;
   overflow: hidden;
+  background: transparent;
 }
 </style>

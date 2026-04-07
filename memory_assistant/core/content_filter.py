@@ -1,6 +1,6 @@
 """
 记忆内容过滤策略
-判断哪些内容值得存入长期记忆
+判断哪些内容值得存入持久记忆
 """
 import re
 from typing import Tuple, Optional, List
@@ -17,7 +17,11 @@ class ContentFilter:
         r'^谢谢[。！]?$',
         r'^再见[。！]?$',
         r'^好的?$',
+        r'^好吧[。！]?$',
+        r'^行吧[。！]?$',
+        r'^可以[。！]?$',
         r'^嗯+[。！]?$',
+        r'^嗯嗯+[。！]?$',
         r'^哦+[。！]?$',
         r'^哈哈+$',
         r'^拜拜+$',
@@ -30,34 +34,53 @@ class ContentFilter:
 
     # 询问类内容的模式
     QUERY_PATTERNS = [
-        r'^[请问]?.*[是什么|在哪里|怎么做|为什么|有多少].*[？?]$',
-        r'^[请问]?.*[(查询|搜索|查找|检索)].*[？?]?$',
-        r'^[(帮我|给我|可以)].*[看看|看看|查一下|找一下].*',
-        r'.*[(查询|查找|搜索)]我的.*',
+        r'^(?:请问)?.*(?:是什么|在哪里|怎么做|为什么|有多少).*[？?]$',
+        r'^(?:请问)?.*(?:查询|搜索|查找|检索).*[？?]?$',
+        r'^(?:帮我|给我|可以).*(?:看看|查一下|找一下).*',
+        r'.*(?:查询|查找|搜索)我的.*',
     ]
 
-    # 值得记忆的内容模式
-    VALUABLE_PATTERNS = [
-        # 安排/计划 - 放宽匹配条件
-        r'[(明天|后天|下周|周日|周一|周二|周三|周四|周五|周六|周日|周1|周2|周3|周4|周5|周6|周7|星期)].*[(要|需要|计划|准备|去|参加|做|有个)]',
-        r'[(会议|约会|活动|考试|面试|报告|演讲|聚会|聚餐|见面|差旅|出差|旅行|旅游)].*[(在|定于|安排|是|明天|后天|下周)]',
-        r'[(提交|截止|到期|完成|截止)].*[日前|号|周]',
-        r'[(记得|别忘了|提醒|记住)].*[(做|去|参加|交|完成|拿|取|买)]',
+    REMINDER_PATTERNS = [
+        r'(?:提醒我|记得提醒我|叫我|闹钟|到时候提醒我)',
+        r'(?:记得|别忘了|提醒|记住).*(?:做|去|参加|交|完成|拿|取|买)',
+    ]
 
-        # 重要信息
-        r'[(生日|纪念日|节日)].*[(是|在)]',
-        r'[(账号|密码|地址|电话|邮箱|身份证号)]',
-        r'[(喜欢|讨厌|感兴趣|爱好|热衷|痴迷|不喜欢|反感|厌恶|擅长|精通|不擅长|不会)]',
-        r'[(工作|职业|公司|职位|专业|岗位)]',
-        r'[(住址|地址|位置|地点|住在)]',
-        r'[(姓名|名字|称呼|叫)]',
+    EVENT_PATTERNS = [
+        r'(?:明天|后天|下周|周日|周一|周二|周三|周四|周五|周六|周天|周[1-7]|星期(?:一|二|三|四|五|六|日|天)?).*(?:去|参加|出席|有个|安排了)',
+        r'(?:会议|约会|活动|考试|面试|报告|演讲|聚会|聚餐|见面|差旅|出差|旅行|旅游).*(?:在|定于|安排|是|明天|后天|下周|今天|周)',
+        r'(?:生日|纪念日|节日).*(?:是|在)',
+    ]
 
-        # 待办任务 - 放宽匹配
-        r'[(待办|任务|todo|TODO|提醒|需要)].*[:：]',
-        r'[(帮我|我要|我需要)].*[(记录|记一下|设置|添加|创建)].*[(任务|提醒|待办)]',
-        r'^\s*[-•·]\s+.*[(完成|处理|做|准备|买|拿|取)]',
-        r'[(清单|列表)].*[:：]',
-        r'[(记得|别忘了)].*[(做|去|参加|交|完成|拿|取|买)]',
+    TASK_PATTERNS = [
+        r'^(?:待办|任务|todo|TODO)[:：]?\s*\S+',
+        r'(?:清单|列表).*[:：]',
+        r'^\s*[-•·]\s+',
+        r'(?:提交|截止|到期).*(?:前|之前|日前|号|本周|这周|下周)',
+        r'(?:周[一二三四五六日天]|下周|本周|这周|\d{1,2}[号日]).{0,4}(?:前|之前).*(?:提交|完成|处理|整理|准备|联系|跟进|修复|确认)',
+        r'^(?:我|我们)(?:还)?(?:要|得|需要|准备|计划|打算)?(?:把|将)?[\u4e00-\u9fa5A-Za-z0-9_，、\s]{0,20}(?:完成|处理|整理|准备|编写|提交|联系|跟进|修复|安排|确认|补充|学习|复习|制作|更新)',
+        r'^(?:先|需要|还得|得)\S{0,20}(?:完成|处理|整理|准备|提交|联系|跟进|修复|安排|确认)',
+        r'(?:帮我|我要|我需要).*(?:记录|记一下|设置|添加|创建).*(?:任务|待办)',
+    ]
+
+    FACT_PATTERNS = [
+        r'(?:账号|密码|地址|电话|邮箱|身份证号)',
+        r'(?:喜欢|讨厌|感兴趣|爱好|热衷|痴迷|不喜欢|反感|厌恶|擅长|精通|不擅长|不会)',
+        r'(?:工作|职业|公司|职位|专业|岗位)',
+        r'(?:住址|地址|位置|地点|住在)',
+        r'(?:姓名|名字|称呼|叫)',
+        r'(?:过敏|不能吃|忌口)',
+        r'(?:习惯|经常|总是|从不)',
+    ]
+
+    PERSONAL_ATTRIBUTE_PATTERNS = [
+        r'(?:我|本人).*(?:喜欢|讨厌|反感|厌恶|不爱|不爱吃)',
+        r'(?:我|本人).*(?:过敏|不能吃|忌口)',
+        r'(?:我|本人).*(?:擅长|不擅长|会|不会)',
+        r'(?:我|本人).*(?:习惯|经常|总是|从不)',
+        r'(?:我|本人).*(?:是|为).*(?:学生|老师|工程师|程序员|产品经理|设计师|职业|职位|身份)',
+        r'(?:我的|本人).*(?:名字|姓名|称呼|昵称)',
+        r'(?:我|本人).*(?:住|居住|工作).*(?:在|于)',
+        r'(?:我|本人).*(?:爱好|兴趣|热衷于)',
     ]
 
     # 会议纪要特征
@@ -74,12 +97,21 @@ class ContentFilter:
 
     # 删除/取消指令模式
     DELETE_PATTERNS = [
-        r'[(取消|删除|移除|清空|清除)].*[(所有|全部|一切)].*[(安排|计划|日程|任务|待办)]',
-        r'[(取消|删除|移除|清空|清除)].*\d{1,2}[月\-\.]?\d{1,2}[日号]?.*[(安排|计划|日程|任务|待办)]',
-        r'\d{1,2}[月\-\.]?\d{1,2}[日号]?.*[(所有|全部)].*[(取消|删除|清空)]',
-        r'[(取消|删除|移除|清空)].*(?:明天|后天|今天|昨天|下周|这周|本周)',
-        r'[(取消|删除|移除|清空)].*[(会议|约会|活动|考试|面试|报告|演讲|聚会|任务|待办|安排)]',
-        r'^\s*[(删除|取消|移除|清空)].*\d{1,2}[号日].*',
+        r'(?:取消|删除|移除|清空|清除).*(?:所有|全部|一切).*(?:安排|计划|日程|任务|待办)',
+        r'(?:取消|删除|移除|清空|清除).*\d{1,2}[月\-\.]?\d{1,2}[日号]?.*(?:安排|计划|日程|任务|待办)',
+        r'\d{1,2}[月\-\.]?\d{1,2}[日号]?.*(?:所有|全部).*(?:取消|删除|清空)',
+        r'(?:取消|删除|移除|清空).*(?:明天|后天|今天|昨天|下周|这周|本周)',
+        r'(?:取消|删除|移除|清空).*(?:会议|约会|活动|考试|面试|报告|演讲|聚会|任务|待办|安排)',
+        r'^\s*(?:删除|取消|移除|清空).*\d{1,2}[号日].*',
+    ]
+
+    TEMPORAL_PATTERNS = [
+        r'(?:今天|明天|后天|昨天|下周|本周|这周|周[一二三四五六日天]|星期[一二三四五六日天])',
+        r'\d{1,2}[月/.-]\d{1,2}[日号]?',
+        r'\d{4}[年/.-]\d{1,2}[月/.-]\d{1,2}[日号]?',
+        r'\d{1,2}[:：]\d{2}',
+        r'\d{1,2}\s*(?:点|时)(?:半|整|\d{1,2}分?)?',
+        r'(?:上午|下午|中午|晚上|凌晨|傍晚)',
     ]
 
     @staticmethod
@@ -161,23 +193,23 @@ class ContentFilter:
         """判断是否为询问/查询"""
         content = content.strip()
         # 检查是否是询问记忆库 - 明确查询意图
-        if re.search(r'[(查|看看|找)].*[(我的|我)].*[(记忆|记得|安排|计划|日程|待办)]', content):
+        if re.search(r'(?:查|看看|找).*(?:我的|我).*(?:记忆|记得|安排|计划|日程|待办)', content):
             return True
-        if re.search(r'[(我的|我)].*[(记忆|安排|计划|日程|待办)].*[(是|有)].*[什么|哪些]', content):
+        if re.search(r'(?:我的|我).*(?:记忆|安排|计划|日程|待办).*(?:是|有).*(?:什么|哪些)', content):
             return True
         # 检查 "X号我要做什么" 这类查询 - 更严格的匹配
-        if re.search(r'\d{1,2}[号日].*[(我要|我有什么)].*[(做|安排|干嘛)]', content):
+        if re.search(r'\d{1,2}[号日].*(?:我要|我有什么).*(?:做|安排|干嘛)', content):
             return True
         # 检查 "X号有什么安排" 这类查询
-        if re.search(r'\d{1,2}[号日].*[(有什么|有哪些)].*[(安排|计划)]', content):
+        if re.search(r'\d{1,2}[号日].*(?:有什么|有哪些).*(?:安排|计划)', content):
             return True
         # 检查其他询问模式（但排除以"我"开头的陈述）
-        if re.search(r'^[请问]', content):
+        if re.search(r'^请问', content):
             for pattern in ContentFilter.QUERY_PATTERNS:
                 if re.search(pattern, content, re.IGNORECASE):
                     return True
         # 以问号结尾的短句通常也是询问（但排除"我要..."这样的陈述）
-        if (content.endswith('?') or content.endswith('？')) and not re.search(r'^我[要|想|需要]', content):
+        if (content.endswith('?') or content.endswith('？')) and not re.search(r'^我(?:要|想|需要)', content):
             return True
         return False
 
@@ -189,6 +221,44 @@ class ContentFilter:
             if re.search(pattern, content):
                 return True
         return False
+
+    @staticmethod
+    def _matches_any(content: str, patterns: List[str]) -> bool:
+        return any(re.search(pattern, content, re.IGNORECASE) for pattern in patterns)
+
+    @staticmethod
+    def is_personal_attribute(content: str) -> bool:
+        content = content.strip()
+        return ContentFilter._matches_any(content, ContentFilter.PERSONAL_ATTRIBUTE_PATTERNS)
+
+    @staticmethod
+    def has_temporal_reference(content: str) -> bool:
+        content = content.strip()
+        return ContentFilter._matches_any(content, ContentFilter.TEMPORAL_PATTERNS)
+
+    @staticmethod
+    def classify_memory_type(content: str, has_time: bool = False) -> Optional[str]:
+        content = content.strip()
+        if not content:
+            return None
+
+        if ContentFilter.is_chitchat(content) or ContentFilter.is_query(content):
+            return None
+        if ContentFilter.is_meeting_notes(content):
+            return "event"
+        if ContentFilter._matches_any(content, ContentFilter.REMINDER_PATTERNS):
+            return "reminder"
+        if ContentFilter._matches_any(content, ContentFilter.EVENT_PATTERNS):
+            return "event"
+        if ContentFilter._matches_any(content, ContentFilter.TASK_PATTERNS):
+            return "task"
+        if ContentFilter.is_personal_attribute(content) and not has_time:
+            return "fact"
+        if ContentFilter._matches_any(content, ContentFilter.FACT_PATTERNS):
+            return "fact"
+        if 15 <= len(content) <= 500 and re.search(r'(?:是|在|有).*(?:做|去|参加|吃|玩|用)', content):
+            return "fact"
+        return None
 
     @staticmethod
     def is_valuable(content: str) -> Tuple[bool, Optional[str], float]:
@@ -208,38 +278,16 @@ class ContentFilter:
         if ContentFilter.is_query(content):
             return False, None, 0.0
 
-        # 3. 检查是否是会议纪要（高价值）
-        if ContentFilter.is_meeting_notes(content):
-            return True, 'event', 0.9
-
-        # 4. 检查其他有价值内容
-        for pattern in ContentFilter.VALUABLE_PATTERNS:
-            if re.search(pattern, content):
-                # 判断具体类型 - 更宽松的匹配
-                if re.search(r'[(会议|约会|活动|考试|面试|报告|演讲|聚会|聚餐|见面|差旅|出差|旅行|旅游|提交|截止|到期)]', content):
-                    return True, 'event', 0.8
-                elif re.search(r'[(生日|纪念日|节日)]', content):
-                    return True, 'event', 0.85
-                elif re.search(r'[(记得|别忘了|提醒|记住)].*[(做|去|拿|取|买|参加|交|完成)]', content):
-                    return True, 'reminder', 0.75
-                elif re.search(r'[(待办|任务|清单|列表)]', content):
-                    return True, 'task', 0.7
-                elif re.search(r'[(需要|我要|帮我)].*[(做|去|拿|取|买|准备)]', content):
-                    return True, 'task', 0.65
-                else:
-                    return True, 'fact', 0.6
-
-        # 5. 内容长度判断（适中长度且有意义）- 放宽条件
-        if 15 <= len(content) <= 500:
-            # 检查是否包含具体信息
-            if re.search(r'[(是|在|有|需要|准备|喜欢|讨厌|擅长)].*[(做|去|参加|完成|提交|吃|玩|用)]', content):
-                return True, 'fact', 0.5
-
-        # 6. 对话类记忆（只要不是闲聊和查询，短对话也可以作为chat类型存储）
-        if 10 <= len(content) <= 200:
-            # 检查是否包含一些实质性内容
-            if re.search(r'[(我|我们|我的)].*[(觉得|认为|想|感觉|看法)]', content):
-                return True, 'chat', 0.4
+        memory_type = ContentFilter.classify_memory_type(content)
+        if memory_type == 'event':
+            importance = 0.9 if ContentFilter.is_meeting_notes(content) else 0.8
+            return True, memory_type, importance
+        if memory_type == 'reminder':
+            return True, memory_type, 0.75
+        if memory_type == 'task':
+            return True, memory_type, 0.7
+        if memory_type == 'fact':
+            return True, memory_type, 0.6
 
         return False, None, 0.0
 
@@ -326,5 +374,4 @@ def should_remember(content: str) -> bool:
 
 def get_memory_type(content: str) -> Optional[str]:
     """获取内容应该被分类的记忆类型"""
-    is_valuable, mem_type, _ = ContentFilter.is_valuable(content)
-    return mem_type if is_valuable else None
+    return ContentFilter.classify_memory_type(content)

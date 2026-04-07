@@ -11,7 +11,7 @@ import uuid
 
 class MemoryType(Enum):
     """记忆类型"""
-    CHAT = "chat"           # 对话记录
+    CHAT = "chat"           # 兼容历史数据，新的长期记忆不再使用
     DOCUMENT = "document"   # 文档内容
     EVENT = "event"         # 事件记录
     FACT = "fact"           # 事实知识
@@ -37,8 +37,12 @@ class MemoryEntry:
     """
     content: str
     user_id: str
-    memory_type: MemoryType = MemoryType.CHAT
+    memory_type: MemoryType = MemoryType.FACT
     memory_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    scope: str = "user"
+    session_id: Optional[str] = None
+    turn_id: Optional[str] = None
+    status: str = "active"
 
     # 时间属性
     created_at: datetime = field(default_factory=datetime.now)
@@ -56,11 +60,9 @@ class MemoryEntry:
     tags: List[str] = field(default_factory=list)
     related_entities: List[str] = field(default_factory=list)
     source: str = "user"            # 来源
-    source_id: Optional[str] = None
 
     # 向量表示 (用于语义检索)
     embedding: Optional[List[float]] = None
-    vector_id: Optional[str] = None
 
     # 元数据
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -72,6 +74,10 @@ class MemoryEntry:
             'user_id': self.user_id,
             'content': self.content,
             'memory_type': self.memory_type.value,
+            'scope': self.scope,
+            'session_id': self.session_id,
+            'turn_id': self.turn_id,
+            'status': self.status,
             'state': self.state.value,
             'created_at': self.created_at.isoformat(),
             'updated_at': self.updated_at.isoformat(),
@@ -83,7 +89,6 @@ class MemoryEntry:
             'tags': self.tags,
             'related_entities': self.related_entities,
             'source': self.source,
-            'source_id': self.source_id,
             'metadata': self.metadata,
         }
 
@@ -93,8 +98,12 @@ class MemoryEntry:
         entry = cls(
             content=data['content'],
             user_id=data['user_id'],
-            memory_type=MemoryType(data.get('memory_type', 'chat')),
+            memory_type=MemoryType(data.get('memory_type', 'fact')),
             memory_id=data.get('memory_id', str(uuid.uuid4())),
+            scope=data.get('scope', 'user'),
+            session_id=data.get('session_id'),
+            turn_id=data.get('turn_id'),
+            status=data.get('status', 'active'),
         )
         entry.state = MemoryState(data.get('state', 'new'))
         entry.confidence = data.get('confidence', 0.5)
@@ -104,9 +113,7 @@ class MemoryEntry:
         entry.tags = data.get('tags', [])
         entry.related_entities = data.get('related_entities', [])
         entry.source = data.get('source', 'user')
-        entry.source_id = data.get('source_id')
         entry.metadata = data.get('metadata', {})
-        entry.vector_id = data.get('vector_id')
 
         # 解析时间
         for field_name in ['created_at', 'updated_at', 'last_accessed']:

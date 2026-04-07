@@ -7,9 +7,9 @@
 
 html, body {
   height: 100%;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: #0f172a;
-  color: #f1f5f9;
+  font-family: 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', sans-serif;
+  background: #0a1321;
+  color: #eef6ff;
 }
 
 #app {
@@ -18,40 +18,47 @@ html, body {
 
 // Element Plus 暗黑主题覆盖
 :root {
-  --el-bg-color: #1e293b;
-  --el-bg-color-overlay: #1e293b;
-  --el-text-color-primary: #f1f5f9;
-  --el-text-color-regular: #e2e8f0;
-  --el-text-color-secondary: #94a3b8;
-  --el-border-color: #334155;
-  --el-border-color-light: #475569;
-  --el-fill-color: #334155;
-  --el-fill-color-light: #334155;
-  --el-fill-color-blank: #1e293b;
+  --el-color-primary: #38bdf8;
+  --el-color-primary-light-3: #67d2fb;
+  --el-color-primary-light-5: #8bdffd;
+  --el-color-primary-light-7: #b6eefe;
+  --el-color-primary-dark-2: #0ea5e9;
+  --el-bg-color: #0f1d31;
+  --el-bg-color-overlay: #122033;
+  --el-text-color-primary: #eef6ff;
+  --el-text-color-regular: #d7e7f7;
+  --el-text-color-secondary: #8aa1bd;
+  --el-border-color: rgba(127, 156, 191, 0.18);
+  --el-border-color-light: rgba(127, 156, 191, 0.12);
+  --el-fill-color: #17263d;
+  --el-fill-color-light: #1a2c47;
+  --el-fill-color-blank: #0f1d31;
+  --el-mask-color: rgba(2, 6, 23, 0.72);
 }
 
 // 滚动条样式
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #1e293b;
+  background: rgba(15, 29, 49, 0.7);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #475569;
-  border-radius: 3px;
+  background: rgba(98, 130, 168, 0.48);
+  border-radius: 999px;
 
   &:hover {
-    background: #64748b;
+    background: rgba(126, 162, 203, 0.68);
   }
 }
 
 // Element Plus 组件样式覆盖
 .el-button {
   transition: all 0.2s ease;
+  font-weight: 600;
 
   &:hover {
     transform: translateY(-1px);
@@ -59,8 +66,9 @@ html, body {
 }
 
 .el-card {
-  border-radius: 12px;
-  border: 1px solid #334155;
+  border-radius: 18px;
+  border: 1px solid rgba(127, 156, 191, 0.14);
+  background: rgba(11, 19, 34, 0.92);
 }
 
 .el-tag {
@@ -69,5 +77,23 @@ html, body {
 
 .el-input__wrapper,
 .el-textarea__inner {
-  border-radius: 8px;
+  border-radius: 14px;
+}
+
+.el-dialog {
+  border: 1px solid rgba(127, 156, 191, 0.16);
+  border-radius: 24px;
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(11, 19, 34, 0.98) 0%, rgba(13, 24, 40, 0.96) 100%);
+  box-shadow: 0 24px 80px rgba(2, 6, 23, 0.35);
+}
+
+.el-overlay-dialog {
+  backdrop-filter: blur(6px);
+}
+
+.el-dialog__header,
+.el-dialog__body,
+.el-dialog__footer {
+  background: transparent;
 }

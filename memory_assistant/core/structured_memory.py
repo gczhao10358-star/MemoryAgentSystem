@@ -5,7 +5,7 @@
 import json
 import re
 from typing import Dict, Optional, Any, List
-from datetime import datetime
+from datetime import datetime, timedelta
 from ..utils.llm_client import LLMClient
 
 
@@ -92,9 +92,18 @@ class MemoryCRUD:
         self.storage = memory_storage
         self.embedding_model = embedding_model
         self.extractor = StructuredMemoryExtractor(llm_client)
+        self.merge_candidate_window = timedelta(minutes=10)
 
-    async def create(self, user_id: str, content: str, current_time: Dict[str, Any],
-                    memory_type: str = "auto") -> Dict[str, Any]:
+    async def create(self,
+                     user_id: str,
+                     content: str,
+                     current_time: Dict[str, Any],
+                     memory_type: str = "auto",
+                     session_id: Optional[str] = None,
+                     turn_id: Optional[str] = None,
+                     scope: str = "user",
+                     status: str = "active",
+                     source: str = "user") -> Dict[str, Any]:
         """
         创建新记忆
 
@@ -121,6 +130,25 @@ class MemoryCRUD:
             if structured.get("type") == "meeting":
                 structured["type"] = "event"
 
+        duplicate_entry = await self._find_recent_duplicate_entry(
+            user_id=user_id,
+            structured=structured,
+            raw_content=content,
+            session_id=session_id,
+        )
+        if duplicate_entry:
+            updated = await self._merge_into_existing_entry(
+                entry=duplicate_entry,
+                structured=structured,
+                raw_content=content,
+                importance=structured.get('importance', 0.5),
+            )
+            return {
+                'success': updated,
+                'memory_id': duplicate_entry.memory_id,
+                'structured': structured
+            }
+
         # 3. 生成嵌入向量
         embedding_text = f"{structured['title']} {structured['description']} {structured.get('structured_content', '')}"
         embedding = await self.embedding_model.encode(embedding_text)
@@ -133,7 +161,12 @@ class MemoryCRUD:
             content=structured['structured_content'],
             memory_type=MemoryType(structured['type']),
             importance=structured.get('importance', 0.5),
-            embedding=embedding
+            embedding=embedding,
+            scope=scope,
+            session_id=session_id,
+            turn_id=turn_id,
+            status=status,
+            source=source,
         )
 
         # 5. 存储元数据
@@ -155,6 +188,135 @@ class MemoryCRUD:
             'memory_id': entry.memory_id,
             'structured': structured
         }
+
+    async def _find_recent_duplicate_entry(self,
+                                           user_id: str,
+                                           structured: Dict[str, Any],
+                                           raw_content: str,
+                                           session_id: Optional[str]) -> Optional[Any]:
+        """查找近期同主题的事件/任务，命中后改为更新而非重复新增。"""
+        memory_type = structured.get("type")
+        if memory_type not in {"event", "task", "reminder"}:
+            return None
+
+        recent_entries = await self.storage.get_user_memories(user_id, limit=50)
+        now = datetime.now()
+        incoming_signature = self._build_duplicate_signature(
+            structured.get("title"),
+            structured.get("structured_content") or structured.get("description"),
+            raw_content,
+        )
+        incoming_datetime = str(structured.get("datetime") or "")
+
+        for entry in recent_entries:
+            if entry.memory_type.value != memory_type:
+                continue
+            if session_id and entry.session_id and entry.session_id != session_id:
+                continue
+            if now - entry.created_at > self.merge_candidate_window:
+                continue
+
+            metadata = entry.metadata or {}
+            existing_signature = self._build_duplicate_signature(
+                metadata.get("title"),
+                entry.content,
+                metadata.get("raw_content"),
+            )
+            if not self._should_merge_signatures(incoming_signature, existing_signature):
+                continue
+
+            existing_datetime = str(metadata.get("datetime") or "")
+            if (
+                incoming_datetime
+                and existing_datetime
+                and incoming_datetime != existing_datetime
+                and not session_id
+            ):
+                continue
+
+            return entry
+
+        return None
+
+    def _build_duplicate_signature(self,
+                                   title: Optional[str],
+                                   content: Optional[str],
+                                   raw_content: Optional[str]) -> List[str]:
+        """提取用于判重的核心主题词，尽量忽略日期和口语壳子。"""
+        combined = " ".join([
+            str(title or ""),
+            str(content or ""),
+            str(raw_content or ""),
+        ])
+        normalized = combined.lower()
+        normalized = re.sub(r'\d{4}[年/-]?\d{0,2}[月/-]?\d{0,2}日?', ' ', normalized)
+        normalized = re.sub(r'\d{1,2}[:：]\d{2}', ' ', normalized)
+        normalized = re.sub(r'(明天|后天|今天|下周|本周|上午|下午|晚上|参加|将|我要|我将|有个|一次|目前|尚未|确定)', ' ', normalized)
+        tokens = re.findall(r'[\u4e00-\u9fa5A-Za-z]{2,}', normalized)
+        stopwords = {
+            "我的", "我们", "你们", "他们", "安排", "事项", "事情", "计划", "记录", "一下",
+            "这个", "那个", "进行", "准备", "完成", "相关", "信息"
+        }
+        filtered = [token for token in tokens if token not in stopwords]
+        deduped = []
+        for token in filtered:
+            if token not in deduped:
+                deduped.append(token)
+        return deduped[:8]
+
+    def _should_merge_signatures(self, incoming: List[str], existing: List[str]) -> bool:
+        """判断两个事件签名是否足够接近。"""
+        if not incoming or not existing:
+            return False
+
+        incoming_set = set(incoming)
+        existing_set = set(existing)
+        overlap = incoming_set & existing_set
+        if not overlap:
+            return False
+
+        overlap_ratio = len(overlap) / max(min(len(incoming_set), len(existing_set)), 1)
+        if overlap_ratio >= 0.6:
+            return True
+
+        if len(overlap) == 1:
+            token = next(iter(overlap))
+            if token in {"会议", "开会", "面试", "考试", "聚会", "约会"}:
+                return True
+
+        return False
+
+    async def _merge_into_existing_entry(self,
+                                         entry,
+                                         structured: Dict[str, Any],
+                                         raw_content: str,
+                                         importance: float) -> bool:
+        """将新信息合并到已有记忆中。"""
+        metadata = entry.metadata or {}
+        merged_people = list(dict.fromkeys((metadata.get('people') or []) + (structured.get('people') or [])))
+        merged_tags = list(dict.fromkeys((metadata.get('tags') or []) + (structured.get('tags') or [])))
+
+        new_content = str(structured.get('structured_content') or entry.content).strip() or entry.content
+        if len(new_content) < len(entry.content):
+            new_content = entry.content
+
+        metadata.update({
+            'raw_content': raw_content,
+            'title': structured.get('title') or metadata.get('title'),
+            'datetime': structured.get('datetime') or metadata.get('datetime'),
+            'location': structured.get('location') or metadata.get('location'),
+            'people': merged_people,
+            'tags': merged_tags,
+            'structured': True,
+            'merged_at': datetime.now().isoformat(),
+        })
+
+        entry.content = new_content
+        entry.importance = max(entry.importance, importance)
+        entry.updated_at = datetime.now()
+        entry.metadata = metadata
+
+        return await self.storage.update_memory(entry)
 
     async def read(self, memory_id: str) -> Optional[Dict[str, Any]]:
         """读取记忆"""
@@ -179,7 +341,7 @@ class MemoryCRUD:
         if 'content' in updates:
             entry.content = updates['content']
             # 重新生成嵌入
-            embedding = await self.embedding_model.embed(updates['content'])
+            embedding = await self.embedding_model.encode(updates['content'])
             entry.embedding = embedding
 
         # 更新元数据
@@ -229,6 +391,9 @@ class MemoryCRUD:
 
             for r in raw_results:
                 results.append(self._entry_to_dict(r.memory))
+        else:
+            entries = await self.storage.get_user_memories(user_id, limit=top_k)
+            results = [self._entry_to_dict(entry) for entry in entries]
 
         # 2. 应用过滤器
         if filters:
@@ -313,6 +478,10 @@ class MemoryCRUD:
             'user_id': entry.user_id,
             'content': entry.content,
             'memory_type': entry.memory_type.value,
+            'scope': entry.scope,
+            'session_id': entry.session_id,
+            'turn_id': entry.turn_id,
+            'status': entry.status,
             'importance': entry.importance,
             'created_at': entry.created_at.isoformat(),
             'updated_at': entry.updated_at.isoformat(),

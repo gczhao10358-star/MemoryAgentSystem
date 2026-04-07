@@ -53,16 +53,25 @@ const router = createRouter({
   routes
 })
 
-router.beforeEach((to, from, next) => {
+router.beforeEach(async (to) => {
   const userStore = useUserStore()
 
-  if (!to.meta.public && !userStore.isLoggedIn) {
-    next('/login')
-  } else if (to.path === '/login' && userStore.isLoggedIn) {
-    next('/')
-  } else {
-    next()
+  if (!to.meta.public) {
+    if (!userStore.isLoggedIn) {
+      return '/login'
+    }
+
+    const hydrated = await userStore.hydrateUser()
+    if (!hydrated.success) {
+      return '/login'
+    }
   }
+
+  if (to.path === '/login' && userStore.isLoggedIn) {
+    return '/'
+  }
+
+  return true
 })
 
 export default router

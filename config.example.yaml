@@ -16,15 +16,17 @@ embedding:
   batch_size: 32
 
 memory:
-  working_memory:
+  # 新命名：session_memory / memory_cache
+  # 旧命名：working_memory / short_term_memory 仍兼容，便于平滑迁移
+  session_memory:
     max_turns: 20
     max_tokens: 4000
 
-  short_term_memory:
+  memory_cache:
     max_entries: 100
     ttl_days: 7
 
-  long_term_memory:
+  durable_memory:
     vector_store:
       type: "faiss"
       index_path: "./data/vector_index"

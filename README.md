@@ -1,14 +1,14 @@
 # 智忆助理 (MemoryMate)
 
-> 个性化长期记忆智能体系统
+> 个性化记忆助理系统
 
 ## 项目概述
 
-智忆助理是一款基于大语言模型和长期记忆机制的智能Agent，通过构建个性化知识库，实现多源信息的统一存储与语义检索，持续学习用户偏好和行为模式，提供上下文连贯的个性化交互体验。
+智忆助理是一款基于大语言模型的个性化记忆 Agent，通过构建用户级持久记忆和会话级上下文，实现多源信息的统一存储与语义检索，持续学习用户偏好和行为模式，提供上下文连贯的个性化交互体验。
 
 ## 核心特性
 
-- **三级记忆架构**: 工作记忆、短期记忆、长期记忆
+- **统一记忆架构**: `session memory` + `durable memory` + `pinned view`
 - **混合检索引擎**: 稠密检索 + 稀疏检索 + RRF融合 + 个性化重排序
 - **用户画像学习**: 多维度用户建模，持续学习用户偏好
 - **记忆演化机制**: 自动遗忘与强化，保持记忆时效性
@@ -17,6 +17,8 @@
 - **时间智能解析**: 支持自然语言时间描述（如"明天下午3点"）
 - **会议记录解析**: 支持PDF/DOCX/TXT/MD格式，智能提取会议信息
 - **中文优化**: 基于jieba的中文分词和关键词提取
+
+当前推荐的记忆架构说明见：[docs/memory-architecture.md](./docs/memory-architecture.md)
 
 ## 项目结构
 
@@ -260,17 +262,23 @@ curl -X POST http://localhost:8000/api/documents/upload \
 
 ```yaml
 memory:
-  working_memory:
-    max_turns: 20          # 工作记忆最大轮次
+  session_memory:
+    max_turns: 20          # 会话记忆最大轮次
 
-  short_term_memory:
-    max_entries: 100       # 短期记忆最大条目
-    ttl_days: 7            # 短期记忆保留天数
+  memory_cache:
+    max_entries: 100       # 近期缓存最大条目
+    ttl_days: 7            # 近期缓存保留天数
 
   evolution:
     decay_rate: 0.05       # 记忆衰减率
     forget_threshold: 0.15 # 遗忘阈值
 ```
+
+说明：
+- `session_memory` 负责当前会话线程的上下文拼接。
+- `memory_cache` 是近期热点记忆缓存，不是业务真相源。
+- 持久记忆以 SQLite + 向量索引为主，`pinned view` 是从持久记忆动态筛出的高价值记忆视图。
+- 旧配置名 `working_memory` 和 `short_term_memory` 仍兼容。
 
 ### 检索配置
 
@@ -436,7 +444,7 @@ python api.py
 
 ### v1.0 (2026-03-10)
 - 初始版本发布
-- 实现三级记忆架构
+- 实现早期分层记忆架构
 - 完成混合检索引擎
 - 添加用户画像学习
 

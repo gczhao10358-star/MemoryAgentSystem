@@ -8,15 +8,19 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 
 from ..models.user_profile import UserProfile
+from ..utils.topic_utils import sanitize_topic_preferences, filter_displayable_topic_preferences
 
 
 class ProfileManager:
     """用户画像管理器"""
 
-    def __init__(self, data_dir: str = "./data"):
+    def __init__(self, data_dir: str = "./data", metadata_store: Optional[Any] = None):
         self.data_dir = data_dir
+        self.metadata_store = metadata_store
         self.profiles: Dict[str, UserProfile] = {}
-        self._ensure_dir()
+        self.file_storage_enabled = metadata_store is None
+        if self.file_storage_enabled:
+            self._ensure_dir()
 
     def _ensure_dir(self):
         """确保数据目录存在"""
@@ -25,6 +29,20 @@ class ProfileManager:
     def _get_profile_path(self, user_id: str) -> str:
         """获取用户画像文件路径"""
         return os.path.join(self.data_dir, f"{user_id}_profile.json")
+
+    def _load_profile_from_file(self, user_id: str) -> Optional[UserProfile]:
+        """从文件加载画像，仅用于兼容旧数据。"""
+        profile_path = self._get_profile_path(user_id)
+        if not os.path.exists(profile_path):
+            return None
+
+        try:
+            with open(profile_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return UserProfile.from_dict(data)
+        except Exception as e:
+            print(f"Error loading profile for {user_id}: {e}")
+            return None
 
     async def get_profile(self, user_id: str) -> UserProfile:
         """
@@ -36,23 +54,31 @@ class ProfileManager:
         Returns:
             用户画像
         """
-        profile_path = self._get_profile_path(user_id)
-        if os.path.exists(profile_path):
-            try:
-                with open(profile_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                profile = UserProfile.from_dict(data)
-            except Exception as e:
-                print(f"Error loading profile for {user_id}: {e}")
-                profile = self.profiles.get(user_id, UserProfile(user_id=user_id))
-        elif user_id in self.profiles:
-            # 文件不存在时再回退到内存缓存
-            profile = self.profiles[user_id]
+        if user_id in self.profiles:
+            self.profiles[user_id].topic_preferences = sanitize_topic_preferences(
+                self.profiles[user_id].topic_preferences
+            )
+            return self.profiles[user_id]
+
+        if self.metadata_store:
+            user_record = await self.metadata_store.get_user(user_id)
+            if user_record and user_record.get("profile_data"):
+                try:
+                    profile_data = user_record["profile_data"]
+                    if isinstance(profile_data, str):
+                        profile_data = json.loads(profile_data)
+                    profile = UserProfile.from_dict(profile_data)
+                except Exception as e:
+                    print(f"Error loading profile snapshot for {user_id}: {e}")
+                    profile = UserProfile(user_id=user_id)
+            else:
+                # 尝试兼容历史文件，并将其视为一次性迁移来源
+                profile = self._load_profile_from_file(user_id) or UserProfile(user_id=user_id)
         else:
-            # 创建新画像
-            profile = UserProfile(user_id=user_id)
+            profile = self._load_profile_from_file(user_id) or UserProfile(user_id=user_id)
 
         # 缓存到内存
+        profile.topic_preferences = sanitize_topic_preferences(profile.topic_preferences)
         self.profiles[user_id] = profile
         return profile
 
@@ -68,11 +94,22 @@ class ProfileManager:
         """
         try:
             profile.updated_at = datetime.now()
+            profile.topic_preferences = sanitize_topic_preferences(profile.topic_preferences)
 
             # 更新内存缓存
             self.profiles[profile.user_id] = profile
 
-            # 保存到文件
+            if self.metadata_store:
+                user_record = await self.metadata_store.get_user(profile.user_id)
+                if user_record:
+                    await self.metadata_store.update_user_profile_data(
+                        profile.user_id,
+                        profile.to_dict(),
+                    )
+                return True
+
+            # 文件模式仅用于无 metadata_store 的兼容场景
+            self._ensure_dir()
             profile_path = self._get_profile_path(profile.user_id)
             with open(profile_path, 'w', encoding='utf-8') as f:
                 json.dump(profile.to_dict(), f, ensure_ascii=False, indent=2)
@@ -125,7 +162,10 @@ class ProfileManager:
             if user_id in self.profiles:
                 del self.profiles[user_id]
 
-            # 删除文件
+            if self.metadata_store:
+                await self.metadata_store.clear_user_profile_data(user_id)
+                return True
+
             profile_path = self._get_profile_path(user_id)
             if os.path.exists(profile_path):
                 os.remove(profile_path)
@@ -145,20 +185,22 @@ class ProfileManager:
         Returns:
             统计信息
         """
-        # 统计接口优先从磁盘重新加载，避免外部写入后读到陈旧缓存
+        # 统计接口统一走当前真源（数据库或兼容文件）
         profile = await self.get_profile(user_id)
 
         if not profile:
             return {}
 
+        displayable_topics = filter_displayable_topic_preferences(profile.topic_preferences)
+
         return {
             'user_id': user_id,
             'created_at': profile.created_at.isoformat(),
             'updated_at': profile.updated_at.isoformat(),
-            'topic_count': len(profile.topic_preferences),
+            'topic_count': len(displayable_topics),
             'top_topics': [
                 {'topic': p.topic, 'weight': p.weight}
-                for p in sorted(profile.topic_preferences,
+                for p in sorted(displayable_topics,
                                key=lambda x: x.weight, reverse=True)[:5]
             ],
             'expertise_count': len(profile.expertise_areas),

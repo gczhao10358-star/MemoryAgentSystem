@@ -6,9 +6,11 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from collections import Counter
 import re
+import jieba.posseg as pseg
 
 from ..models.user_profile import UserProfile, TopicPreference, ExpertiseArea
 from ..utils.text_processor import text_processor
+from ..utils.topic_utils import is_meaningful_topic, normalize_topic
 
 
 class ProfileLearner:
@@ -17,6 +19,34 @@ class ProfileLearner:
     def __init__(self, learning_rate: float = 0.1):
         self.learning_rate = learning_rate
         self.min_interactions_for_pattern = 3
+        self.topic_pos_whitelist = {'n', 'nr', 'ns', 'nt', 'nz', 'vn', 'eng'}
+
+    def _extract_topic_candidates(self, query: str, top_k: int = 3) -> List[str]:
+        """提取更像“主题”的候选词，避免动作词和泛词污染画像。"""
+        raw_keywords = text_processor.extract_keywords(query, top_k=max(top_k * 2, 6))
+        pos_map = {}
+        for word, flag in pseg.cut(query):
+            normalized = normalize_topic(word)
+            if normalized and normalized not in pos_map:
+                pos_map[normalized] = flag
+
+        topic_candidates = []
+        for keyword in raw_keywords:
+            normalized = normalize_topic(keyword)
+            if not is_meaningful_topic(normalized):
+                continue
+
+            flag = pos_map.get(normalized, '')
+            if flag and not any(flag.startswith(prefix) for prefix in self.topic_pos_whitelist):
+                continue
+
+            if normalized not in topic_candidates:
+                topic_candidates.append(normalized)
+
+            if len(topic_candidates) >= top_k:
+                break
+
+        return topic_candidates
 
     async def learn_from_interaction(self,
                                      profile: UserProfile,
@@ -57,8 +87,7 @@ class ProfileLearner:
                                        query: str,
                                        response: str):
         """更新话题偏好"""
-        # 提取查询中的关键词
-        keywords = text_processor.extract_keywords(query, top_k=5)
+        keywords = self._extract_topic_candidates(query, top_k=3)
 
         # 更新每个关键词的权重
         for keyword in keywords:
@@ -199,7 +228,7 @@ class ProfileLearner:
         topic_trends = {}
         for interaction in interactions:
             query = interaction.get('query', '')
-            keywords = text_processor.extract_keywords(query, top_k=3)
+            keywords = self._extract_topic_candidates(query, top_k=3)
 
             for kw in keywords:
                 if kw not in topic_trends:

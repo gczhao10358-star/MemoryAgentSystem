@@ -4,6 +4,7 @@
 """
 import json
 import asyncio
+import re
 from typing import AsyncGenerator, Dict, Any, List
 from datetime import datetime
 
@@ -21,6 +22,29 @@ class MeetingAnalyzer:
 
     def __init__(self, llm_client):
         self.llm_client = llm_client
+        self.action_section_keywords = (
+            "待办事项", "待办", "行动项", "行动计划", "下一步", "后续工作", "后续安排",
+            "todo", "to-do", "action items", "next steps"
+        )
+        self.non_action_section_keywords = (
+            "会议摘要", "总结", "背景", "议题", "讨论", "风险", "问题", "备注", "决策", "结论"
+        )
+        self.action_verbs = (
+            "负责", "完成", "跟进", "安排", "准备", "整理", "推进", "确认", "提交",
+            "对接", "同步", "反馈", "评估", "制定", "输出", "补充", "更新", "处理",
+            "落实", "协助", "汇总", "提供", "修复", "上线", "排查", "review", "follow up"
+        )
+        self.deadline_pattern = re.compile(
+            r"("
+            r"\d{4}[年/-]\d{1,2}[月/-]\d{1,2}日?"
+            r"|\d{1,2}月\d{1,2}日"
+            r"|今天|今日|明天|后天|今晚|明早|本周[一二三四五六日天]?"
+            r"|下周[一二三四五六日天]?"
+            r"|周[一二三四五六日天]"
+            r"|月底|月初|月中|本月底|下月底"
+            r"|会后|尽快|ASAP|asap"
+            r")"
+        )
 
     async def analyze_stream(
         self,
@@ -83,8 +107,10 @@ class MeetingAnalyzer:
                 }
 
                 chunk_result = await self._analyze_chunk(chunk, global_result, user_id)
+                rule_action_items = self._extract_rule_based_action_items(chunk)
 
                 all_action_items.extend(chunk_result.get('action_items', []))
+                all_action_items.extend(rule_action_items)
                 all_preferences.extend(chunk_result.get('preferences', []))
                 all_memory_suggestions.extend(chunk_result.get('memory_suggestions', []))
 
@@ -94,7 +120,8 @@ class MeetingAnalyzer:
                     "progress": progress,
                     "data": {
                         "chunk_index": i,
-                        "action_items_found": len(chunk_result.get('action_items', [])),
+                        "action_items_found": len(chunk_result.get('action_items', [])) + len(rule_action_items),
+                        "rule_action_items_found": len(rule_action_items),
                         "preferences_found": len(chunk_result.get('preferences', [])),
                     },
                     "status": "processing"
@@ -324,13 +351,21 @@ class MeetingAnalyzer:
 
     def _deduplicate_action_items(self, items: List[Dict]) -> List[Dict]:
         """去重待办事项"""
-        seen = set()
         result = []
+        index_by_key = {}
         for item in items:
-            key = item.get('content', '').strip()[:50]  # 取前50字作为key
-            if key and key not in seen:
-                seen.add(key)
-                result.append(item)
+            normalized = self._normalize_action_item(item)
+            if not normalized:
+                continue
+            key = self._normalize_action_key(normalized.get('content', ''))
+            if not key:
+                continue
+            existing_index = index_by_key.get(key)
+            if existing_index is None:
+                index_by_key[key] = len(result)
+                result.append(normalized)
+                continue
+            result[existing_index] = self._merge_action_items(result[existing_index], normalized)
         return result
 
     def _deduplicate_preferences(self, prefs: List[Dict]) -> List[Dict]:
@@ -357,3 +392,217 @@ class MeetingAnalyzer:
                 seen.add(key)
                 result.append(mem)
         return result
+
+    def _extract_rule_based_action_items(self, chunk: str) -> List[Dict]:
+        """基于显式规则提取待办事项，补强LLM漏召回场景。"""
+        items = []
+        lines = [line.rstrip() for line in chunk.splitlines()]
+        idx = 0
+
+        while idx < len(lines):
+            line = lines[idx].strip()
+            if not line:
+                idx += 1
+                continue
+
+            if self._is_action_section_header(line):
+                idx += 1
+                consumed = 0
+                while idx < len(lines) and consumed < 8:
+                    candidate = lines[idx].strip()
+                    if not candidate:
+                        if consumed > 0:
+                            break
+                        idx += 1
+                        continue
+                    if self._is_action_section_header(candidate) or self._is_non_action_section_header(candidate):
+                        break
+
+                    item = self._build_action_item_from_line(candidate, allow_loose=True)
+                    if item:
+                        items.append(item)
+                        consumed += 1
+                    elif consumed > 0 and not self._looks_like_action_sentence(candidate):
+                        break
+                    idx += 1
+                continue
+
+            standalone_item = self._build_action_item_from_line(line, allow_loose=False)
+            if standalone_item:
+                items.append(standalone_item)
+            idx += 1
+
+        return self._deduplicate_action_items(items)
+
+    def _build_action_item_from_line(self, line: str, allow_loose: bool) -> Dict[str, Any]:
+        cleaned = self._clean_action_line(line)
+        if not cleaned:
+            return {}
+
+        if allow_loose:
+            if not self._is_explicit_task_line(cleaned):
+                return {}
+        elif not self._looks_like_action_sentence(cleaned):
+            return {}
+
+        assignee = self._extract_assignee(cleaned)
+        deadline = self._extract_deadline(cleaned)
+        content = self._normalize_action_content(cleaned)
+
+        if not content or content in {"无", "暂无", "没有", "none"}:
+            return {}
+
+        should_remind = bool(deadline or assignee or self._looks_like_action_sentence(cleaned))
+        return {
+            "content": content,
+            "assignee": assignee,
+            "deadline": deadline,
+            "priority": self._infer_priority(cleaned),
+            "should_remind": should_remind,
+            "suggested_reminder_time": deadline if deadline else ("会后提醒" if should_remind else None),
+        }
+
+    def _clean_action_line(self, line: str) -> str:
+        line = re.sub(r"^\s*(\d+[.)、]|[-*•●]|[一二三四五六七八九十]+[、.])\s*", "", line.strip())
+        line = re.sub(r"^\[\s*[xX]?\s*\]\s*", "", line)
+        line = re.sub(r"^\[?\d{1,2}:\d{2}(?::\d{2})?\]?\s*", "", line)
+        line = re.sub(r"^(TODO|Todo|todo|待办事项|待办|行动项|下一步|后续工作)\s*[:：-]\s*", "", line)
+        line = re.sub(r"\s+", " ", line)
+        return line.strip(" \t;；,，。")
+
+    def _normalize_action_content(self, line: str) -> str:
+        content = line
+        content = re.sub(r"^\[\s*[xX]?\s*\]\s*", "", content)
+        content = re.sub(r"^(由)?[@A-Za-z0-9_\u4e00-\u9fa5]{1,12}[：:]\s*", "", content)
+        content = re.sub(r"^(请|需要|需|建议)\s*", "", content)
+        content = re.sub(r"\s+", " ", content)
+        return content.strip(" \t;；,，。")
+
+    def _strip_deadline_clause(self, content: str, deadline: str) -> str:
+        if not content or not deadline:
+            return content
+
+        normalized_deadline = deadline.strip()
+        patterns = [
+            rf"[，,、;\s]*截止\s*{re.escape(normalized_deadline)}$",
+            rf"[，,、;\s]*于\s*{re.escape(normalized_deadline)}\s*(?:前|之前)?$",
+            rf"[，,、;\s]*在\s*{re.escape(normalized_deadline)}\s*(?:前|之前)?$",
+            rf"[，,、;\s]*{re.escape(normalized_deadline)}\s*(?:前|之前)?$",
+        ]
+
+        cleaned = content.strip()
+        for pattern in patterns:
+            cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip(" \t;；,，。")
+        return cleaned
+
+    def _is_action_section_header(self, line: str) -> bool:
+        lowered = line.strip().lower().rstrip(":：")
+        return any(keyword in lowered for keyword in self.action_section_keywords) and len(lowered) <= 24
+
+    def _is_non_action_section_header(self, line: str) -> bool:
+        normalized = line.strip().rstrip(":：")
+        return any(keyword in normalized for keyword in self.non_action_section_keywords) and len(normalized) <= 20
+
+    def _is_explicit_task_line(self, line: str) -> bool:
+        if len(line) < 4 or len(line) > 120:
+            return False
+        if line in {"无", "暂无", "没有", "none"}:
+            return False
+        return (
+            line.startswith("@")
+            or "负责" in line
+            or "TODO" in line.upper()
+            or bool(re.match(r"^[A-Za-z0-9_\u4e00-\u9fa5]{1,20}[：:]", line))
+            or self._looks_like_action_sentence(line)
+        )
+
+    def _looks_like_action_sentence(self, line: str) -> bool:
+        if len(line) < 4 or len(line) > 120:
+            return False
+        lowered = line.lower()
+        has_deadline = bool(self._extract_deadline(line))
+        has_action_verb = any(verb in lowered for verb in self.action_verbs)
+        has_assignment = bool(re.search(r"(@[\w\u4e00-\u9fa5-]+|由[\w\u4e00-\u9fa5-]{1,12}负责|[\w\u4e00-\u9fa5-]{1,12}负责|^[\w\u4e00-\u9fa5-]{1,20}[：:])", line))
+        starts_with_task_prefix = bool(re.match(r"^(请|需要|需|建议|安排|跟进|完成|提交|确认|准备|整理)", line))
+        return (has_action_verb and (has_deadline or has_assignment or starts_with_task_prefix)) or line.upper().startswith("TODO")
+
+    def _extract_assignee(self, line: str) -> str:
+        patterns = [
+            r"@([\w\u4e00-\u9fa5-]{1,20})",
+            r"由([\w\u4e00-\u9fa5-]{1,20})负责",
+            r"([\w\u4e00-\u9fa5-]{1,20})负责",
+            r"^([\w\u4e00-\u9fa5-]{1,20})[：:]",
+            r"owner[:：]\s*([\w\u4e00-\u9fa5-]{1,20})",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, line, flags=re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        return ""
+
+    def _extract_deadline(self, line: str) -> str:
+        deadline_match = re.search(
+            r"(截止[^\s，。,；;]{0,16}|[^\s，。,；;]{0,12}(前|之前|内完成)|"
+            + self.deadline_pattern.pattern[1:-1]
+            + r")",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if deadline_match:
+            return deadline_match.group(1).strip()
+        return ""
+
+    def _infer_priority(self, line: str) -> str:
+        lowered = line.lower()
+        if any(keyword in lowered for keyword in ("紧急", "立即", "马上", "尽快", "今天", "今日", "asap")):
+            return "high"
+        if any(keyword in lowered for keyword in ("后续", "有空", "择期")):
+            return "low"
+        return "medium"
+
+    def _normalize_action_item(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(item, dict):
+            return {}
+
+        content = str(item.get("content", "")).strip()
+        if not content:
+            return {}
+
+        assignee = str(item.get("assignee", "") or "").strip()
+        deadline = str(item.get("deadline", "") or "").strip()
+        content = self._normalize_action_content(content)
+        content = self._strip_deadline_clause(content, deadline)
+        priority = str(item.get("priority", "") or "").strip().lower()
+        if priority not in {"high", "medium", "low"}:
+            priority = self._infer_priority(content)
+        should_remind = item.get("should_remind")
+        if should_remind is None:
+            should_remind = bool(deadline)
+
+        return {
+            "content": content,
+            "assignee": assignee,
+            "deadline": deadline,
+            "priority": priority,
+            "should_remind": bool(should_remind),
+            "suggested_reminder_time": str(item.get("suggested_reminder_time", "") or "").strip() or (deadline if deadline else None),
+        }
+
+    def _normalize_action_key(self, content: str) -> str:
+        normalized = re.sub(r"[\s，。,；;：:、\-—_]+", "", content or "")
+        return normalized[:60].lower()
+
+    def _merge_action_items(self, base: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(base)
+        for field in ("assignee", "deadline", "suggested_reminder_time"):
+            if not merged.get(field) and incoming.get(field):
+                merged[field] = incoming[field]
+
+        priority_rank = {"high": 3, "medium": 2, "low": 1}
+        if priority_rank.get(incoming.get("priority"), 0) > priority_rank.get(merged.get("priority"), 0):
+            merged["priority"] = incoming["priority"]
+
+        merged["should_remind"] = bool(base.get("should_remind") or incoming.get("should_remind"))
+        if len(incoming.get("content", "")) > len(merged.get("content", "")):
+            merged["content"] = incoming["content"]
+        return merged

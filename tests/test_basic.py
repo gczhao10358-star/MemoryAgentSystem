@@ -60,7 +60,7 @@ async def test_memory_models():
         entry = MemoryEntry(
             content="这是一个测试记忆",
             user_id="test_user",
-            memory_type=MemoryType.CHAT,
+            memory_type=MemoryType.FACT,
         )
 
         assert entry.memory_id is not None, "记忆ID未生成"

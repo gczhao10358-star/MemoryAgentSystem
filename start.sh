@@ -65,6 +65,35 @@ build_frontend() {
   (cd "$FRONTEND_DIR" && npm run build)
 }
 
+frontend_needs_rebuild() {
+  if [[ ! -f "$FRONTEND_DIST_INDEX" ]]; then
+    return 0
+  fi
+
+  local watch_paths=(
+    "$FRONTEND_DIR/src"
+    "$FRONTEND_DIR/public"
+    "$FRONTEND_DIR/index.html"
+    "$FRONTEND_DIR/package.json"
+    "$FRONTEND_DIR/package-lock.json"
+    "$FRONTEND_DIR/vite.config.js"
+  )
+
+  local path
+  for path in "${watch_paths[@]}"; do
+    [[ -e "$path" ]] || continue
+    if [[ -d "$path" ]]; then
+      if find "$path" -type f -newer "$FRONTEND_DIST_INDEX" | grep -q .; then
+        return 0
+      fi
+    elif [[ "$path" -nt "$FRONTEND_DIST_INDEX" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 main() {
   local rebuild_frontend="false"
   local port="8000"
@@ -101,7 +130,7 @@ main() {
   load_env_file
   ensure_port_available "$port"
 
-  if [[ "$rebuild_frontend" == "true" || ! -f "$FRONTEND_DIST_INDEX" ]]; then
+  if [[ "$rebuild_frontend" == "true" ]] || frontend_needs_rebuild; then
     build_frontend
   fi
 

@@ -8,6 +8,8 @@ from typing import Dict, List, Optional, Any, Callable
 from datetime import datetime, timedelta
 from enum import Enum
 
+from .content_filter import ContentFilter, get_memory_type
+
 
 class WorkflowStep:
     """工作流步骤"""
@@ -25,10 +27,17 @@ class WorkflowStep:
 
 class WorkflowContext:
     """工作流上下文"""
-    def __init__(self, user_id: str, message: str, current_time: Dict[str, Any]):
+    def __init__(self,
+                 user_id: str,
+                 message: str,
+                 current_time: Dict[str, Any],
+                 session_id: Optional[str] = None,
+                 turn_id: Optional[str] = None):
         self.user_id = user_id
         self.message = message
         self.current_time = current_time
+        self.session_id = session_id
+        self.turn_id = turn_id
         self.data = {}  # 中间数据存储
         self.result = None
         self.error = None
@@ -56,10 +65,12 @@ class IntentType(Enum):
 class MemoryWorkflowEngine:
     """记忆工作流引擎"""
 
-    def __init__(self, llm_client, memory_crud, datetime_tools):
+    def __init__(self, llm_client, memory_crud, datetime_tools, memory_service=None, profile_manager=None):
         self.llm_client = llm_client
         self.memory_crud = memory_crud
         self.datetime_tools = datetime_tools
+        self.memory_service = memory_service
+        self.profile_manager = profile_manager
 
         # 注册工作流
         self.workflows = {
@@ -73,7 +84,12 @@ class MemoryWorkflowEngine:
         # 任务调度器（可选）
         self.task_scheduler = None
 
-    async def process(self, user_id: str, message: str, current_time: Dict[str, Any]) -> WorkflowContext:
+    async def process(self,
+                      user_id: str,
+                      message: str,
+                      current_time: Dict[str, Any],
+                      session_id: Optional[str] = None,
+                      turn_id: Optional[str] = None) -> WorkflowContext:
         """
         处理用户请求
 
@@ -83,7 +99,7 @@ class MemoryWorkflowEngine:
         # 0. 先检查是否是简单问候（预设回复）
         simple_response = await self._generate_simple_response(message)
         if simple_response:
-            context = WorkflowContext(user_id, message, current_time)
+            context = WorkflowContext(user_id, message, current_time, session_id=session_id, turn_id=turn_id)
             context.result = simple_response
             return context
 
@@ -91,7 +107,7 @@ class MemoryWorkflowEngine:
         intent, thought, extracted_content = await self._recognize_intent(message)
 
         # 2. 创建上下文
-        context = WorkflowContext(user_id, message, current_time)
+        context = WorkflowContext(user_id, message, current_time, session_id=session_id, turn_id=turn_id)
         context.set('intent', intent)
         context.set('thought', thought)
         context.set('extracted_content', extracted_content)
@@ -239,7 +255,7 @@ class MemoryWorkflowEngine:
         elif re.search(r'在吗|在么', message_lower):
             return "在的！有什么可以帮你的吗？"
         elif re.search(r'你是什么|你是谁|叫什么|怎么称呼', message_lower):
-            return "我是智忆助理(MemoryMate)，一个具备长期记忆能力的AI助手。我会记住你的信息，为你提供个性化的帮助。"
+            return "我是智忆助理(MemoryMate)，一个具备持久记忆和会话上下文能力的AI助手。我会记住重要信息，为你提供个性化的帮助。"
         elif re.search(r'你会什么|你能做什么|帮助', message_lower):
             return "我可以帮你：1) 记录重要信息、计划和待办事项；2) 回答关于你过往记忆的问题；3) 进行日常对话和知识问答。有什么想记录或查询的吗？"
         else:
@@ -281,7 +297,7 @@ class MemoryWorkflowEngine:
 
     async def _step_chat_generate(self, ctx: WorkflowContext) -> WorkflowContext:
         """生成普通回复"""
-        system_prompt = """你是智忆助理(MemoryMate)，一个具备长期记忆能力的AI助手。
+        system_prompt = """你是智忆助理(MemoryMate)，一个具备持久记忆和会话上下文能力的AI助手。
 
 你的特点：
 1. 你会记住用户告诉你的信息，在后续对话中使用这些信息提供个性化帮助
@@ -303,12 +319,36 @@ class MemoryWorkflowEngine:
     # ========== 存储工作流步骤 ==========
 
     async def _step_extract_time(self, ctx: WorkflowContext) -> WorkflowContext:
-        """提取并计算具体时间"""
+        """提取并计算具体时间，优先使用本地解析器保证相对日期稳定。"""
         current_date = ctx.current_time['date']  # YYYY-MM-DD
         current_weekday = ctx.current_time['weekday_name']
 
         # 使用提取的内容（如果没有则使用原始消息）
         content = ctx.get('extracted_content') or ctx.message
+
+        # 先用本地解析器，避免“明天/后天/今天下午3点”这类表达被模型漂移
+        try:
+            from ..utils.time_parser import time_parser
+
+            base_time = datetime.fromisoformat(ctx.current_time['iso'])
+            parsed_time = time_parser.parse(content, base_time)
+            if parsed_time:
+                has_explicit_time = bool(re.search(
+                    r'(\d{1,2}[:：]\d{2}|\d{1,2}\s*[点时](半|整|\d{1,2}分?)?|早上|早晨|上午|中午|下午|傍晚|晚上|夜间)',
+                    content
+                ))
+                date_description = time_parser.format_time(parsed_time, 'human') if has_explicit_time else parsed_time.strftime('%Y年%m月%d日')
+                time_info = {
+                    'event_date': parsed_time.strftime('%Y-%m-%d'),
+                    'event_time': parsed_time.strftime('%H:%M') if has_explicit_time else None,
+                    'date_description': date_description,
+                    'time_confidence': 'high'
+                }
+                ctx.set('time_info', time_info)
+                ctx.set('event_date', parsed_time.replace(hour=0, minute=0, second=0, microsecond=0))
+                return ctx
+        except Exception as e:
+            print(f"Error parsing time locally: {e}")
 
         prompt = f"""当前日期：{current_date} ({current_weekday})
 用户输入："{content}"
@@ -412,11 +452,18 @@ class MemoryWorkflowEngine:
 
         # 搜索该日期的所有事件
         date_str = event_date.strftime('%Y-%m-%d')
-        existing_memories = await self.memory_crud.search_by_date(
-            user_id=ctx.user_id,
-            date_str=date_str,
-            memory_types=['event', 'task', 'reminder']
-        )
+        if self.memory_service:
+            existing_memories = await self.memory_service.search_memories_by_date(
+                user_id=ctx.user_id,
+                date_str=date_str,
+                memory_types=['event', 'task', 'reminder']
+            )
+        else:
+            existing_memories = await self.memory_crud.search_by_date(
+                user_id=ctx.user_id,
+                date_str=date_str,
+                memory_types=['event', 'task', 'reminder']
+            )
 
         if existing_memories:
             # 检查时间重叠
@@ -464,25 +511,59 @@ class MemoryWorkflowEngine:
         # 使用提取的内容（如果没有则使用原始消息）
         content_for_check = ctx.get('extracted_content') or ctx.message
         is_personal_attribute = self._is_personal_attribute(content_for_check)
+        classified_type = get_memory_type(content_for_check)
 
         if is_personal_attribute and not has_time:
+            target_memory_type = 'fact'
+        elif classified_type in {'event', 'task', 'reminder'}:
+            target_memory_type = classified_type
+        else:
+            target_memory_type = 'auto'
+
+        if target_memory_type == 'fact':
             # 存储为个人属性（FACT类型，高重要性）
-            result = await self.memory_crud.create(
-                user_id=ctx.user_id,
-                content=polished,
-                current_time=ctx.current_time,
-                memory_type='fact'
-            )
+            if self.memory_service:
+                result = await self.memory_service.store_memory(
+                    user_id=ctx.user_id,
+                    content=polished,
+                    current_time=ctx.current_time,
+                    memory_type=target_memory_type,
+                    session_id=ctx.session_id,
+                    turn_id=ctx.turn_id,
+                    scope='user',
+                    status='active',
+                    source='user',
+                )
+            else:
+                result = await self.memory_crud.create(
+                    user_id=ctx.user_id,
+                    content=polished,
+                    current_time=ctx.current_time,
+                    memory_type=target_memory_type
+                )
             # 同时更新用户画像
             await self._update_profile_with_attribute(ctx.user_id, content_for_check)
         else:
-            # 存储为普通记忆（自动识别类型）
-            result = await self.memory_crud.create(
-                user_id=ctx.user_id,
-                content=polished,
-                current_time=ctx.current_time,
-                memory_type='auto'
-            )
+            # 存储为普通记忆（优先使用启发式类型，兜底再交给 auto）
+            if self.memory_service:
+                result = await self.memory_service.store_memory(
+                    user_id=ctx.user_id,
+                    content=polished,
+                    current_time=ctx.current_time,
+                    memory_type=target_memory_type,
+                    session_id=ctx.session_id,
+                    turn_id=ctx.turn_id,
+                    scope='user',
+                    status='active',
+                    source='user',
+                )
+            else:
+                result = await self.memory_crud.create(
+                    user_id=ctx.user_id,
+                    content=polished,
+                    current_time=ctx.current_time,
+                    memory_type=target_memory_type
+                )
 
         if result['success']:
             structured = result['structured']
@@ -494,34 +575,21 @@ class MemoryWorkflowEngine:
 
     def _is_personal_attribute(self, message: str) -> bool:
         """判断是否为个人属性（无时间的个人特征）"""
-        import re
-        # 个人属性关键词模式
-        attribute_patterns = [
-            r'[(我|本人)].*[(喜欢|讨厌|反感|厌恶|不爱|不爱吃)]',
-            r'[(我|本人)].*[(过敏|不能吃|不能吃|忌口)]',
-            r'[(我|本人)].*[(擅长|不擅长|会|不会)]',
-            r'[(我|本人)].*[(习惯|经常|总是|从不)]',
-            r'[(我|本人)].*[(是|为)].*[(身份|职业|职位)]',
-            r'[(我的|本人)].*[(名字|姓名|称呼|昵称)]',
-            r'[(我|本人)].*[(住|居住|工作)].*[(在|于)]',
-            r'[(我|本人)].*[(爱好|兴趣|热衷于)]',
-        ]
-        for pattern in attribute_patterns:
-            if re.search(pattern, message):
-                return True
-        return False
+        return ContentFilter.is_personal_attribute(message)
 
     async def _update_profile_with_attribute(self, user_id: str, message: str):
         """从个人属性消息中更新用户画像"""
         try:
             # 提取偏好或属性
-            from ..profile.profile_manager import ProfileManager
-            profile_manager = ProfileManager()
+            if not self.profile_manager:
+                return
+
+            profile_manager = self.profile_manager
             profile = await profile_manager.get_profile(user_id)
 
             # 识别话题偏好
             import re
-            if re.search(r'[(喜欢|爱好|感兴趣|热衷于)]', message):
+            if re.search(r'(?:喜欢|爱好|感兴趣|热衷于)', message):
                 # 提取喜欢的事物作为话题
                 topic_match = re.search(r'喜欢.*?([\u4e00-\u9fa5]{2,10})', message)
                 if topic_match:
@@ -605,22 +673,37 @@ class MemoryWorkflowEngine:
         if start_date and end_date:
             current = start_date
             while current <= end_date:
-                memories = await self.memory_crud.search_by_date(
-                    user_id=ctx.user_id,
-                    date_str=current.strftime('%Y-%m-%d'),
-                    memory_types=['event', 'task', 'reminder']
-                )
+                if self.memory_service:
+                    memories = await self.memory_service.search_memories_by_date(
+                        user_id=ctx.user_id,
+                        date_str=current.strftime('%Y-%m-%d'),
+                        memory_types=['event', 'task', 'reminder']
+                    )
+                else:
+                    memories = await self.memory_crud.search_by_date(
+                        user_id=ctx.user_id,
+                        date_str=current.strftime('%Y-%m-%d'),
+                        memory_types=['event', 'task', 'reminder']
+                    )
                 all_memories.extend(memories)
                 current += timedelta(days=1)
 
         # 2. 语义搜索补充
         # 使用提取的内容进行搜索
         search_query = ctx.get('extracted_content') or ctx.message
-        semantic_results = await self.memory_crud.search(
-            user_id=ctx.user_id,
-            query=search_query,
-            top_k=10
-        )
+        if self.memory_service:
+            semantic_results = await self.memory_service.search_memories(
+                user_id=ctx.user_id,
+                query=search_query,
+                top_k=10,
+                use_personalization=False,
+            )
+        else:
+            semantic_results = await self.memory_crud.search(
+                user_id=ctx.user_id,
+                query=search_query,
+                top_k=10
+            )
 
         # 合并去重
         seen_ids = {m['memory_id'] for m in all_memories}
@@ -705,11 +788,18 @@ class MemoryWorkflowEngine:
         if not date_str:
             return ctx
 
-        memories = await self.memory_crud.search_by_date(
-            user_id=ctx.user_id,
-            date_str=date_str,
-            memory_types=['event', 'task', 'reminder']
-        )
+        if self.memory_service:
+            memories = await self.memory_service.search_memories_by_date(
+                user_id=ctx.user_id,
+                date_str=date_str,
+                memory_types=['event', 'task', 'reminder']
+            )
+        else:
+            memories = await self.memory_crud.search_by_date(
+                user_id=ctx.user_id,
+                date_str=date_str,
+                memory_types=['event', 'task', 'reminder']
+            )
 
         ctx.set('memories_to_delete', memories)
 
@@ -735,7 +825,10 @@ class MemoryWorkflowEngine:
         else:
             # 只有一条，直接删除
             for mem in memories:
-                await self.memory_crud.delete(mem['memory_id'])
+                if self.memory_service:
+                    await self.memory_service.delete_memory(mem['memory_id'])
+                else:
+                    await self.memory_crud.delete(mem['memory_id'])
 
             date_str = ctx.get('delete_date', '')
             date_display = date_str.replace('-', '年', 1).replace('-', '月') + '日'

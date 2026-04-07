@@ -16,6 +16,23 @@ class MemoryStorage:
                  metadata_store: SQLiteMetadataStore):
         self.vector_store = vector_store
         self.metadata_store = metadata_store
+        self.memory_cache = None
+
+    def set_memory_cache(self, memory_cache):
+        """注入缓存层，用于加速 durable memory 读取。"""
+        self.memory_cache = memory_cache
+
+    async def _load_entry(self, memory_id: str, user_id: Optional[str] = None) -> Optional[MemoryEntry]:
+        """优先从缓存中读取完整记忆，未命中再回源 SQLite。"""
+        if self.memory_cache:
+            cached_entry = await self.memory_cache.get(memory_id, user_id=user_id)
+            if cached_entry:
+                return cached_entry
+
+        entry = await self.metadata_store.get_memory(memory_id)
+        if entry and self.memory_cache:
+            await self.memory_cache.store(entry)
+        return entry
 
     async def initialize(self):
         """初始化存储"""
@@ -34,6 +51,8 @@ class MemoryStorage:
                 {
                     'user_id': entry.user_id,
                     'memory_type': entry.memory_type.value,
+                    'scope': entry.scope,
+                    'session_id': entry.session_id,
                     'created_at': entry.created_at.isoformat(),
                 }
             )
@@ -62,7 +81,7 @@ class MemoryStorage:
         # 获取完整的记忆信息
         results = []
         for vr in vector_results:
-            entry = await self.metadata_store.get_memory(vr['id'])
+            entry = await self._load_entry(vr['id'], user_id=user_id)
             if entry:
                 results.append({
                     'entry': entry,
@@ -74,22 +93,43 @@ class MemoryStorage:
     async def retrieve_by_content(self, user_id: str, keyword: str,
                                   limit: int = 20) -> List[MemoryEntry]:
         """通过内容关键词检索记忆"""
-        return await self.metadata_store.search_by_content(user_id, keyword, limit)
+        entries = await self.metadata_store.search_by_content(user_id, keyword, limit)
+        if self.memory_cache:
+            for entry in entries:
+                await self.memory_cache.store(entry)
+        return entries
 
     async def get_memory(self, memory_id: str) -> Optional[MemoryEntry]:
         """获取单个记忆"""
-        return await self.metadata_store.get_memory(memory_id)
+        return await self._load_entry(memory_id)
 
     async def update_memory(self, entry: MemoryEntry) -> bool:
         """更新记忆"""
-        return await self.metadata_store.update_memory(entry)
+        if hasattr(self.vector_store, "metadata"):
+            vector_metadata = self.vector_store.metadata.get(entry.memory_id)
+            if vector_metadata is not None:
+                vector_metadata.update({
+                    "user_id": entry.user_id,
+                    "memory_type": entry.memory_type.value,
+                    "scope": entry.scope,
+                    "session_id": entry.session_id,
+                    "created_at": entry.created_at.isoformat(),
+                })
+        success = await self.metadata_store.update_memory(entry)
+        if success and self.memory_cache:
+            await self.memory_cache.store(entry)
+        return success
 
     async def delete_memory(self, memory_id: str) -> bool:
         """删除记忆"""
+        entry = await self._load_entry(memory_id)
         # 标记删除向量
         await self.vector_store.delete(memory_id)
         # 删除元数据
-        return await self.metadata_store.delete_memory(memory_id)
+        success = await self.metadata_store.delete_memory(memory_id)
+        if success and self.memory_cache:
+            self.memory_cache.remove(memory_id, user_id=entry.user_id if entry else None)
+        return success
 
     async def delete_memories_by_date(self, user_id: str, date_str: str,
                                        memory_types: List[str] = None) -> int:
@@ -180,7 +220,11 @@ class MemoryStorage:
 
     async def get_user_memories(self, user_id: str, limit: int = 100) -> List[MemoryEntry]:
         """获取用户的所有记忆"""
-        return await self.metadata_store.get_memories_by_user(user_id, limit)
+        entries = await self.metadata_store.get_memories_by_user(user_id, limit)
+        if self.memory_cache:
+            for entry in entries:
+                await self.memory_cache.store(entry)
+        return entries
 
     async def retrieve_by_time_range(self, user_id: str,
                                      start_time: datetime,
@@ -198,9 +242,13 @@ class MemoryStorage:
                              memory_type: Optional[str] = None,
                              limit: int = 50) -> List[MemoryEntry]:
         """综合搜索记忆"""
-        return await self.metadata_store.search_memories(
+        entries = await self.metadata_store.search_memories(
             user_id, keyword, start_time, end_time, memory_type, limit
         )
+        if self.memory_cache:
+            for entry in entries:
+                await self.memory_cache.store(entry)
+        return entries
 
     async def save(self):
         """保存向量索引"""

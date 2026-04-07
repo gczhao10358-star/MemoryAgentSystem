@@ -223,7 +223,7 @@ async def lifespan(app: FastAPI):
         async def store_reminder_memory():
             try:
                 from memory_assistant.utils.datetime_tools import get_now
-                await agent.memory_crud.create(
+                await agent.memory_service.store_memory(
                     user_id=task.user_id,
                     content=f"收到提醒: {task.content}",
                     current_time=get_now(),
@@ -262,7 +262,7 @@ async def lifespan(app: FastAPI):
 # 创建FastAPI应用
 app = FastAPI(
     title="智忆助理 API",
-    description="MemoryMate - 具备长期记忆能力的AI助手",
+    description="MemoryMate - 具备持久记忆与会话上下文能力的AI助手",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -284,12 +284,89 @@ class ChatRequest(BaseModel):
     user_id: str = Field(..., description="用户ID")
     message: str = Field(..., description="用户消息")
     stream: bool = Field(False, description="是否流式输出")
+    session_id: Optional[str] = Field(None, description="会话ID，不传则使用默认会话")
+    turn_id: Optional[str] = Field(None, description="当前轮次ID，不传则后端自动生成")
 
 
 class ChatResponse(BaseModel):
     """聊天响应"""
     success: bool
     data: Optional[str] = None
+    session_id: Optional[str] = None
+    turn_id: Optional[str] = None
+    error: Optional[str] = None
+
+
+class SessionItem(BaseModel):
+    """会话项"""
+    session_id: str
+    user_id: str
+    title: str
+    summary: Optional[str] = None
+    preview: Optional[str] = None
+    status: str
+    message_count: int = 0
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    last_message_at: Optional[str] = None
+
+
+class SessionListResponse(BaseModel):
+    """会话列表响应"""
+    success: bool
+    data: List[SessionItem] = []
+    total: int = 0
+    error: Optional[str] = None
+
+
+class SessionMessageItem(BaseModel):
+    """会话消息项"""
+    id: str
+    session_id: str
+    turn_id: Optional[str] = None
+    role: str
+    content: str
+    created_at: str
+
+
+class SessionMessagesResponse(BaseModel):
+    """会话消息响应"""
+    success: bool
+    data: List[SessionMessageItem] = []
+    total: int = 0
+    error: Optional[str] = None
+
+
+class CreateSessionRequest(BaseModel):
+    """创建会话请求"""
+    user_id: str = Field(..., description="用户ID")
+    title: Optional[str] = Field(None, description="会话标题")
+
+
+class CreateSessionResponse(BaseModel):
+    """创建会话响应"""
+    success: bool
+    data: Optional[SessionItem] = None
+    error: Optional[str] = None
+
+
+class UpdateSessionRequest(BaseModel):
+    """更新会话请求"""
+    title: Optional[str] = Field(None, description="会话标题")
+    status: Optional[str] = Field(None, description="会话状态，如 active / archived")
+
+
+class UpdateSessionResponse(BaseModel):
+    """更新会话响应"""
+    success: bool
+    data: Optional[SessionItem] = None
+    error: Optional[str] = None
+
+
+class DeleteSessionResponse(BaseModel):
+    """删除会话响应"""
+    success: bool
+    message: str
     error: Optional[str] = None
 
 
@@ -332,9 +409,26 @@ class SearchResponse(BaseModel):
     error: Optional[str] = None
 
 
+class LegacyMemoryStats(BaseModel):
+    """兼容旧字段的记忆统计。"""
+    working_memory_turns: int = 0
+    short_term_entries: int = 0
+
+
+class MemoryStats(BaseModel):
+    """标准化记忆统计。"""
+    total_memories: int = 0
+    session_turns: int = 0
+    cache_entries: int = 0
+    memory_types: Dict[str, int] = {}
+    avg_confidence: float = 0.0
+    avg_importance: float = 0.0
+    legacy: Optional[LegacyMemoryStats] = None
+
+
 class UserStats(BaseModel):
     """用户统计"""
-    memory: Dict[str, Any]
+    memory: MemoryStats
     profile: Dict[str, Any]
 
 
@@ -365,9 +459,70 @@ class CreateUserResponse(BaseModel):
     error: Optional[str] = None
 
 
+class UserInteractionStyle(BaseModel):
+    """用户交互风格摘要。"""
+    preferred_response_length: Optional[str] = None
+    preferred_detail_level: Optional[str] = None
+    preferred_formality: Optional[str] = None
+    proactivity_level: Optional[str] = None
+    expressiveness: Optional[str] = None
+
+
+class UserSummary(BaseModel):
+    """用户摘要信息。"""
+    user_id: str
+    username: Optional[str] = None
+    name: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    total_interactions: int = 0
+    total_queries: int = 0
+    total_memories_created: int = 0
+    last_interaction: Optional[str] = None
+    interaction_style: UserInteractionStyle = UserInteractionStyle()
+    has_profile: bool = False
+
+
+class UserDetail(UserSummary):
+    """用户详情信息。"""
+    profile: Optional[Dict[str, Any]] = None
+
+
+class GetUserResponse(BaseModel):
+    """获取单个用户响应。"""
+    success: bool
+    data: Optional[UserDetail] = None
+    error: Optional[str] = None
+
+
+class ListUsersResponse(BaseModel):
+    """获取用户列表响应。"""
+    success: bool
+    data: List[UserSummary] = []
+    total: int = 0
+    limit: int = 0
+    offset: int = 0
+    error: Optional[str] = None
+
+
+class UpdateUserRequest(BaseModel):
+    """更新用户请求。"""
+    username: Optional[str] = Field(None, description="新的用户名")
+    name: Optional[str] = Field(None, description="展示名称")
+    interaction_style: Optional[Dict[str, str]] = Field(None, description="交互风格偏好")
+
+
+class UpdateUserResponse(BaseModel):
+    """更新用户响应。"""
+    success: bool
+    data: Optional[UserDetail] = None
+    error: Optional[str] = None
+
+
 class ClearConversationRequest(BaseModel):
     """清空对话请求"""
     user_id: str = Field(..., description="用户ID")
+    session_id: Optional[str] = Field(None, description="会话ID，不传则清空该用户所有会话")
 
 
 class ClearConversationResponse(BaseModel):
@@ -572,6 +727,7 @@ class UploadDocumentResponse(BaseModel):
     message: str
     error: Optional[str] = None
     is_duplicate: bool = False  # 是否重复文件
+    will_reprocess: bool = False  # 重复文件是否需要重新解析
 
 
 class ConfirmActionItemsRequest(BaseModel):
@@ -721,14 +877,115 @@ async def chat(request: ChatRequest):
     与智忆助理进行对话，系统会自动存储对话记忆
     """
     try:
+        session_id = request.session_id or "default"
+        turn_id = request.turn_id or f"turn_{uuid.uuid4().hex[:12]}"
+        await agent.memory_service.create_session(
+            user_id=request.user_id,
+            session_id=session_id,
+        )
         response = await agent.chat(
             user_id=request.user_id,
             message=request.message,
-            stream=request.stream
+            stream=request.stream,
+            session_id=session_id,
+            turn_id=turn_id,
         )
-        return ChatResponse(success=True, data=response)
+        return ChatResponse(success=True, data=response, session_id=session_id, turn_id=turn_id)
     except Exception as e:
         return ChatResponse(success=False, error=str(e))
+
+
+@app.post("/api/sessions", response_model=CreateSessionResponse)
+async def create_session(request: CreateSessionRequest):
+    """创建新会话。"""
+    try:
+        session = await agent.memory_service.create_session(
+            user_id=request.user_id,
+            title=request.title,
+        )
+        return CreateSessionResponse(
+            success=True,
+            data=SessionItem(**session_row_to_dict(session)),
+        )
+    except Exception as e:
+        return CreateSessionResponse(success=False, error=str(e))
+
+
+@app.get("/api/users/{user_id}/sessions", response_model=SessionListResponse)
+async def list_sessions(
+    user_id: str,
+    limit: int = Query(50, ge=1, le=200),
+    include_archived: bool = Query(False, description="是否包含已归档会话")
+):
+    """获取用户历史会话列表。"""
+    try:
+        sessions = await agent.memory_service.list_sessions(
+            user_id=user_id,
+            limit=limit,
+            include_archived=include_archived,
+        )
+        items = [SessionItem(**session_row_to_dict(session)) for session in sessions]
+        return SessionListResponse(success=True, data=items, total=len(items))
+    except Exception as e:
+        return SessionListResponse(success=False, error=str(e))
+
+
+@app.get("/api/users/{user_id}/sessions/{session_id}/messages", response_model=SessionMessagesResponse)
+async def get_session_messages(
+    user_id: str,
+    session_id: str,
+    limit: int = Query(200, ge=1, le=1000)
+):
+    """获取指定会话的消息记录。"""
+    try:
+        messages = await agent.memory_service.get_session_messages(
+            user_id=user_id,
+            session_id=session_id,
+            limit=limit,
+        )
+        items = [SessionMessageItem(**message) for message in messages]
+        return SessionMessagesResponse(success=True, data=items, total=len(items))
+    except Exception as e:
+        return SessionMessagesResponse(success=False, error=str(e))
+
+
+@app.patch("/api/users/{user_id}/sessions/{session_id}", response_model=UpdateSessionResponse)
+async def update_session(
+    user_id: str,
+    session_id: str,
+    request: UpdateSessionRequest
+):
+    """更新会话标题或状态。"""
+    try:
+        session = await agent.memory_service.update_session(
+            user_id=user_id,
+            session_id=session_id,
+            title=request.title,
+            status=request.status,
+        )
+        if not session:
+            return UpdateSessionResponse(success=False, error="会话不存在")
+        return UpdateSessionResponse(
+            success=True,
+            data=SessionItem(**session_row_to_dict(session)),
+        )
+    except Exception as e:
+        return UpdateSessionResponse(success=False, error=str(e))
+
+
+@app.delete("/api/users/{user_id}/sessions/{session_id}", response_model=DeleteSessionResponse)
+async def delete_session(user_id: str, session_id: str):
+    """删除指定会话。"""
+    try:
+        deleted = await agent.memory_service.delete_session(
+            user_id=user_id,
+            session_id=session_id,
+        )
+        if not deleted:
+            return DeleteSessionResponse(success=False, message="", error="会话不存在")
+        return DeleteSessionResponse(success=True, message="会话已删除")
+    except Exception as e:
+        return DeleteSessionResponse(success=False, message="", error=str(e))
 
 
 @app.post("/api/remember", response_model=RememberResponse)
@@ -736,7 +993,7 @@ async def remember(request: RememberRequest):
     """
     显式存储记忆
 
-    将重要信息显式存储到长期记忆中
+    将重要信息显式存储到持久记忆中
     """
     try:
         success = await agent.remember(
@@ -800,10 +1057,28 @@ async def get_user_stats(user_id: str):
     """
     try:
         stats = await agent.get_user_stats(user_id)
+        memory_stats = stats['memory']
+        raw_memory_types = memory_stats.get('memory_types', {})
+        memory_types = {
+            memory_type: count
+            for memory_type, count in raw_memory_types.items()
+            if memory_type != 'chat' and count > 0
+        }
         return StatsResponse(
             success=True,
             data=UserStats(
-                memory=stats['memory'],
+                memory=MemoryStats(
+                    total_memories=memory_stats.get('total_memories', 0),
+                    session_turns=memory_stats.get('session_turns', memory_stats.get('working_memory_turns', 0)),
+                    cache_entries=memory_stats.get('cache_entries', memory_stats.get('short_term_entries', 0)),
+                    memory_types=memory_types,
+                    avg_confidence=memory_stats.get('avg_confidence', 0.0),
+                    avg_importance=memory_stats.get('avg_importance', 0.0),
+                    legacy=LegacyMemoryStats(
+                        working_memory_turns=memory_stats.get('working_memory_turns', memory_stats.get('session_turns', 0)),
+                        short_term_entries=memory_stats.get('short_term_entries', memory_stats.get('cache_entries', 0)),
+                    ),
+                ),
                 profile=stats['profile']
             )
         )
@@ -816,10 +1091,10 @@ async def clear_conversation(request: ClearConversationRequest):
     """
     清空当前对话
 
-    清空工作记忆，开始新的对话
+    清空当前会话上下文，开始新的对话
     """
     try:
-        await agent.clear_conversation(request.user_id)
+        await agent.clear_conversation(request.user_id, request.session_id)
         return ClearConversationResponse(
             success=True,
             message="对话已清空"
@@ -850,43 +1125,17 @@ async def create_user(request: CreateUserRequest):
     根据用户名查找或创建用户。如果用户名已存在，返回现有用户ID。
     """
     try:
-        # 先根据用户名查找现有用户
-        data_dir = agent.config.get('storage', {}).get('data_dir', './data')
         username = request.username.strip()
+        if not username:
+            return CreateUserResponse(success=False, error="用户名不能为空")
 
-        # 扫描现有用户画像文件
-        import os
-        existing_user_id = None
-        for filename in os.listdir(data_dir):
-            if filename.endswith('_profile.json'):
-                # 从文件名提取用户ID (格式: {user_id}_profile.json)
-                file_user_id = filename.replace('_profile.json', '')
-
-                # 如果文件名直接匹配用户名，使用这个用户
-                if file_user_id == username:
-                    existing_user_id = file_user_id
-                    print(f"[用户登录] 文件名匹配: {username} -> {existing_user_id}")
-                    break
-
-                # 否则检查文件内容中的用户名
-                profile_path = os.path.join(data_dir, filename)
-                try:
-                    with open(profile_path, 'r', encoding='utf-8') as f:
-                        profile_data = json.load(f)
-                        # 检查用户名是否匹配 (支持 name 或 username 字段)
-                        profile_name = profile_data.get('name') or profile_data.get('username')
-                        if profile_name == username:
-                            existing_user_id = profile_data.get('user_id') or file_user_id
-                            print(f"[用户登录] 文件内容匹配: {username} -> {existing_user_id}")
-                            break
-                except Exception:
-                    continue
-
-        if existing_user_id:
+        metadata_store = agent.memory_storage.metadata_store
+        existing_user = await metadata_store.get_user_by_username(username)
+        if existing_user:
             # 返回现有用户
             return CreateUserResponse(
                 success=True,
-                user_id=existing_user_id,
+                user_id=existing_user.get("user_id"),
                 username=username
             )
 
@@ -895,8 +1144,16 @@ async def create_user(request: CreateUserRequest):
 
         # 初始化用户画像
         profile = await agent.profile_manager.get_profile(user_id)
+        profile.username = username
         profile.name = username
         await agent.profile_manager.save_profile(profile)
+        created_user = await metadata_store.create_user(
+            user_id=user_id,
+            username=username,
+            profile_data=profile.to_dict(),
+        )
+        if not created_user:
+            return CreateUserResponse(success=False, error="创建用户记录失败")
 
         print(f"[用户登录] 创建新用户: {username} -> {user_id}")
 
@@ -916,6 +1173,10 @@ def memory_entry_to_dict(entry) -> Dict[str, Any]:
         "user_id": entry.user_id,
         "content": entry.content,
         "memory_type": entry.memory_type.value,
+        "scope": getattr(entry, "scope", "user"),
+        "session_id": getattr(entry, "session_id", None),
+        "turn_id": getattr(entry, "turn_id", None),
+        "status": getattr(entry, "status", "active"),
         "state": entry.state.value,
         "created_at": entry.created_at.isoformat(),
         "updated_at": entry.updated_at.isoformat(),
@@ -929,6 +1190,164 @@ def memory_entry_to_dict(entry) -> Dict[str, Any]:
         "source": entry.source,
         "metadata": entry.metadata,
     }
+
+
+def session_row_to_dict(session: Dict[str, Any]) -> Dict[str, Any]:
+    """将会话记录标准化为字典。"""
+    return {
+        "session_id": session.get("session_id"),
+        "user_id": session.get("user_id"),
+        "title": session.get("title") or "新对话",
+        "summary": session.get("summary"),
+        "preview": session.get("preview"),
+        "status": session.get("status") or "active",
+        "message_count": session.get("message_count") or 0,
+        "created_at": session.get("created_at"),
+        "updated_at": session.get("updated_at"),
+        "last_message_at": session.get("last_message_at"),
+    }
+
+
+def user_row_to_dict(user: Dict[str, Any], include_profile: bool = False) -> Dict[str, Any]:
+    """将用户记录标准化为字典。"""
+    profile = None
+    raw_profile = user.get("profile_data")
+    if raw_profile:
+        try:
+            profile = json.loads(raw_profile) if isinstance(raw_profile, str) else raw_profile
+        except Exception:
+            profile = None
+
+    interaction_style = {
+        "preferred_response_length": user.get("preferred_response_length"),
+        "preferred_detail_level": user.get("preferred_detail_level"),
+        "preferred_formality": user.get("preferred_formality"),
+        "proactivity_level": user.get("proactivity_level"),
+        "expressiveness": user.get("expressiveness"),
+    }
+
+    if profile and profile.get("interaction_style"):
+        interaction_style = {
+            "preferred_response_length": interaction_style.get("preferred_response_length")
+            or profile["interaction_style"].get("preferred_response_length"),
+            "preferred_detail_level": interaction_style.get("preferred_detail_level")
+            or profile["interaction_style"].get("preferred_detail_level"),
+            "preferred_formality": interaction_style.get("preferred_formality")
+            or profile["interaction_style"].get("preferred_formality"),
+            "proactivity_level": interaction_style.get("proactivity_level")
+            or profile["interaction_style"].get("proactivity_level"),
+            "expressiveness": interaction_style.get("expressiveness")
+            or profile["interaction_style"].get("expressiveness"),
+        }
+
+    result = {
+        "user_id": user.get("user_id"),
+        "username": user.get("username"),
+        "name": user.get("name") or (profile.get("name") if profile else None),
+        "created_at": user.get("created_at"),
+        "updated_at": user.get("updated_at"),
+        "total_interactions": user.get("total_interactions") or 0,
+        "total_queries": user.get("total_queries") or 0,
+        "total_memories_created": user.get("total_memories_created") or 0,
+        "last_interaction": user.get("last_interaction"),
+        "interaction_style": interaction_style,
+        "has_profile": profile is not None,
+    }
+
+    if include_profile:
+        result["profile"] = profile
+
+    return result
+
+
+@app.get("/api/users", response_model=ListUsersResponse)
+async def list_users(
+    limit: int = Query(20, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    keyword: Optional[str] = Query(None, description="按 user_id、username、name 模糊搜索"),
+):
+    """获取用户列表。"""
+    try:
+        metadata_store = agent.memory_storage.metadata_store
+        users = await metadata_store.list_users(limit=limit, offset=offset, keyword=keyword)
+        total = await metadata_store.count_users(keyword=keyword)
+        return ListUsersResponse(
+            success=True,
+            data=[user_row_to_dict(user) for user in users],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+    except Exception as e:
+        return ListUsersResponse(
+            success=False,
+            data=[],
+            total=0,
+            limit=limit,
+            offset=offset,
+            error=str(e),
+        )
+
+
+@app.get("/api/users/{user_id}", response_model=GetUserResponse)
+async def get_user_detail(user_id: str):
+    """获取用户详情。"""
+    try:
+        metadata_store = agent.memory_storage.metadata_store
+        user = await metadata_store.get_user(user_id)
+        if not user:
+            return GetUserResponse(success=False, error="用户不存在")
+        return GetUserResponse(
+            success=True,
+            data=user_row_to_dict(user, include_profile=True),
+        )
+    except Exception as e:
+        return GetUserResponse(success=False, error=str(e))
+
+
+@app.patch("/api/users/{user_id}", response_model=UpdateUserResponse)
+async def update_user(user_id: str, request: UpdateUserRequest):
+    """更新用户信息和画像摘要。"""
+    try:
+        metadata_store = agent.memory_storage.metadata_store
+        existing_user = await metadata_store.get_user(user_id)
+        if not existing_user:
+            return UpdateUserResponse(success=False, error="用户不存在")
+
+        profile = await agent.profile_manager.get_profile(user_id)
+
+        if request.username is not None:
+            username = request.username.strip()
+            if not username:
+                return UpdateUserResponse(success=False, error="用户名不能为空")
+
+            duplicated = await metadata_store.get_user_by_username(username)
+            if duplicated and duplicated.get("user_id") != user_id:
+                return UpdateUserResponse(success=False, error="用户名已存在")
+            profile.username = username
+
+        if request.name is not None:
+            profile.name = request.name.strip() or None
+
+        if request.interaction_style:
+            for key, value in request.interaction_style.items():
+                if hasattr(profile.interaction_style, key):
+                    setattr(profile.interaction_style, key, value)
+
+        saved = await agent.profile_manager.save_profile(profile)
+        if not saved:
+            return UpdateUserResponse(success=False, error="更新用户失败")
+
+        updated_user = await metadata_store.get_user(user_id)
+        if not updated_user:
+            return UpdateUserResponse(success=False, error="更新后未找到用户")
+
+        return UpdateUserResponse(
+            success=True,
+            data=user_row_to_dict(updated_user, include_profile=True),
+        )
+    except Exception as e:
+        return UpdateUserResponse(success=False, error=str(e))
 
 
 @app.get("/api/users/{user_id}/memories")
@@ -953,6 +1372,7 @@ async def get_user_memories(
 
         # 转换为字典列表
         memories = [memory_entry_to_dict(entry) for entry in entries]
+        memories = [m for m in memories if m["memory_type"] != "chat"]
 
         # 根据类型过滤
         if memory_type:
@@ -1145,12 +1565,12 @@ async def search_structured_memories(request: SearchStructuredRequest):
         if request.person:
             filters['person'] = request.person
 
-        # 使用结构化记忆CRUD搜索
-        results = await agent.memory_crud.search(
+        results = await agent.memory_service.search_memories(
             user_id=request.user_id,
             query=request.query,
             filters=filters if filters else None,
-            top_k=request.top_k
+            top_k=request.top_k,
+            use_personalization=False,
         )
 
         # 转换为响应格式
@@ -1192,7 +1612,7 @@ async def update_memory(memory_id: str, request: UpdateMemoryRequest):
     """
     try:
         # 验证记忆归属
-        memory = await agent.memory_crud.read(memory_id)
+        memory = await agent.memory_service.read_memory(memory_id)
         if not memory:
             return UpdateMemoryResponse(
                 success=False,
@@ -1217,7 +1637,7 @@ async def update_memory(memory_id: str, request: UpdateMemoryRequest):
             updates['metadata'] = request.metadata
 
         # 执行更新
-        success = await agent.memory_crud.update(memory_id, updates)
+        success = await agent.memory_service.update_memory(memory_id, updates)
 
         if success:
             return UpdateMemoryResponse(
@@ -1246,7 +1666,7 @@ async def delete_memory_endpoint(memory_id: str, user_id: str):
     """
     try:
         # 验证记忆归属
-        memory = await agent.memory_crud.read(memory_id)
+        memory = await agent.memory_service.read_memory(memory_id)
         if not memory:
             return {"success": False, "error": "记忆不存在"}
 
@@ -1254,7 +1674,7 @@ async def delete_memory_endpoint(memory_id: str, user_id: str):
             return {"success": False, "error": "无权删除此记忆"}
 
         # 执行删除
-        success = await agent.memory_crud.delete(memory_id)
+        success = await agent.memory_service.delete_memory(memory_id)
 
         if success:
             return {"success": True, "message": "记忆已删除"}
@@ -1317,7 +1737,7 @@ async def create_task(request: CreateTaskRequest):
 
         # 同时存储为记忆
         from memory_assistant.utils.datetime_tools import get_now
-        await agent.memory_crud.create(
+        await agent.memory_service.store_memory(
             user_id=request.user_id,
             content=f"设置了提醒: {request.content} 时间: {reminder_time.strftime('%Y-%m-%d %H:%M')}",
             current_time=get_now(),
@@ -1602,7 +2022,8 @@ async def get_lark_status(user_id: str = Query(..., description="用户ID")):
 async def upload_document(
     file: UploadFile = File(...),
     user_id: str = Form(...),
-    source: str = Form("web")
+    source: str = Form("web"),
+    session_id: Optional[str] = Form(None)
 ):
     """
     上传会议记录文档
@@ -1623,31 +2044,51 @@ async def upload_document(
 
         # 保存到文档存储
         from memory_assistant.storage.document_store import DocumentStore
+        from memory_assistant.ingestion.document_processor import DocumentProcessor
         doc_store = DocumentStore(agent.config.get('storage', {}).get('data_dir', './data'))
 
         save_result = await doc_store.save_file(
             file_path=temp_path,
             user_id=user_id,
             source=source,
-            original_filename=file.filename
+            original_filename=file.filename,
+            metadata={"session_id": session_id} if session_id else None,
         )
 
         # 清理临时文件
         os.remove(temp_path)
 
         if save_result["is_duplicate"]:
+            existing_doc = await doc_store.get_document(save_result["document_id"])
+            existing_metadata = (existing_doc or {}).get("metadata") or {}
+            existing_analysis_version = existing_metadata.get("analysis_version")
+            should_reprocess = existing_analysis_version != DocumentProcessor.ANALYSIS_VERSION
+
+            if should_reprocess:
+                await doc_store.update_status(
+                    document_id=save_result["document_id"],
+                    status="processing",
+                    metadata_updates={
+                        "session_id": session_id,
+                        "analysis_version": "pending_reprocess",
+                    } if session_id else {"analysis_version": "pending_reprocess"},
+                )
+
             return UploadDocumentResponse(
                 success=True,
                 document_id=save_result["document_id"],
-                message="该文件已存在，将使用已有解析结果",
+                message="检测到旧版解析结果，正在重新解析该文件" if should_reprocess else "该文件已存在，将使用已有解析结果",
                 is_duplicate=True
+                ,
+                will_reprocess=should_reprocess
             )
 
         return UploadDocumentResponse(
             success=True,
             document_id=save_result["document_id"],
             message="文件上传成功，请使用WebSocket连接处理进度",
-            is_duplicate=False
+            is_duplicate=False,
+            will_reprocess=False
         )
 
     except Exception as e:
@@ -1671,6 +2112,7 @@ async def document_processing_websocket(websocket: WebSocket, document_id: str):
 
         doc_store = DocumentStore(agent.config.get('storage', {}).get('data_dir', './data'))
         doc_info = await doc_store.get_document(document_id)
+        requested_session_id = websocket.query_params.get("session_id")
 
         if not doc_info:
             await websocket.send_json({
@@ -1681,11 +2123,24 @@ async def document_processing_websocket(websocket: WebSocket, document_id: str):
             await websocket.close()
             return
 
+        effective_session_id = requested_session_id or (doc_info.get("metadata") or {}).get("session_id")
+        cached_metadata = doc_info.get("metadata") or {}
+        cached_analysis_version = cached_metadata.get("analysis_version")
+        is_current_analysis_version = cached_analysis_version == DocumentProcessor.ANALYSIS_VERSION
+
         # 检查文档是否已处理完成
-        if doc_info.get('status') == 'completed' and doc_info.get('analysis_result'):
+        if doc_info.get('status') == 'completed' and doc_info.get('analysis_result') and is_current_analysis_version:
             import json
             import asyncio
             print(f"[WebSocket] 文档 {document_id} 已处理完成，直接返回结果")
+            analysis_result = json.loads(doc_info['analysis_result'])
+            processor = DocumentProcessor(agent)
+            await processor.persist_analysis_completion_message(
+                user_id=doc_info["user_id"],
+                session_id=effective_session_id,
+                document_id=document_id,
+                analysis_result=analysis_result,
+            )
             await websocket.send_json({
                 "stage": "loading",
                 "progress": 0.1,
@@ -1698,9 +2153,9 @@ async def document_processing_websocket(websocket: WebSocket, document_id: str):
                 "progress": 1.0,
                 "data": {
                     "document_id": document_id,
-                    "result": json.loads(doc_info['analysis_result']),
+                    "result": analysis_result,
                     "pending_actions": {
-                        "action_items": 0,
+                        "action_items": len(analysis_result.get("action_items") or []),
                         "need_confirmation": True
                     }
                 },
@@ -1709,6 +2164,11 @@ async def document_processing_websocket(websocket: WebSocket, document_id: str):
             await asyncio.sleep(0.5)  # 给前端时间接收消息
             await websocket.close()
             return
+        elif doc_info.get('status') == 'completed' and doc_info.get('analysis_result'):
+            print(
+                f"[WebSocket] 文档 {document_id} 命中旧版解析结果 "
+                f"(cached={cached_analysis_version}, current={DocumentProcessor.ANALYSIS_VERSION})，重新解析"
+            )
 
         # 创建消息队列
         message_queue = asyncio.Queue()
@@ -1726,7 +2186,8 @@ async def document_processing_websocket(websocket: WebSocket, document_id: str):
                     metadata={
                         "document_id": document_id,
                         "filename": doc_info["filename"],
-                        "source": doc_info["source"]
+                        "source": doc_info["source"],
+                        "session_id": effective_session_id,
                     },
                     document_store=doc_store
                 ):

@@ -4,6 +4,7 @@
 import os
 import shutil
 import hashlib
+import json
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 import sqlite3
@@ -60,7 +61,8 @@ class DocumentStore:
         file_path: str,
         user_id: str,
         source: str = "web",
-        original_filename: Optional[str] = None
+        original_filename: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         保存文件并记录元数据
@@ -104,8 +106,8 @@ class DocumentStore:
             conn.execute("""
                 INSERT INTO documents
                 (document_id, user_id, filename, file_path, file_size, file_hash,
-                 mime_type, doc_type, uploaded_at, source, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 mime_type, doc_type, uploaded_at, source, metadata, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 doc_id,
                 user_id,
@@ -117,6 +119,7 @@ class DocumentStore:
                 ext.lstrip('.'),
                 datetime.now().isoformat(),
                 source,
+                json.dumps(metadata or {}, ensure_ascii=False),
                 "processing"
             ))
 
@@ -131,21 +134,55 @@ class DocumentStore:
         self,
         document_id: str,
         status: str,
-        analysis_result: Optional[Dict] = None
+        analysis_result: Optional[Dict] = None,
+        metadata_updates: Optional[Dict[str, Any]] = None
     ):
         """更新处理状态"""
         with sqlite3.connect(self.db_path) as conn:
+            existing_metadata: Dict[str, Any] = {}
+            if metadata_updates:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT metadata FROM documents WHERE document_id = ?",
+                    (document_id,)
+                ).fetchone()
+                if row:
+                    existing_metadata = self._parse_json_field(row["metadata"], {})
+                existing_metadata.update(metadata_updates)
+
             if analysis_result:
-                import json
-                conn.execute("""
-                    UPDATE documents
-                    SET status = ?, analysis_result = ?
-                    WHERE document_id = ?
-                """, (status, json.dumps(analysis_result, ensure_ascii=False), document_id))
+                if metadata_updates:
+                    conn.execute("""
+                        UPDATE documents
+                        SET status = ?, analysis_result = ?, metadata = ?
+                        WHERE document_id = ?
+                    """, (
+                        status,
+                        json.dumps(analysis_result, ensure_ascii=False),
+                        json.dumps(existing_metadata, ensure_ascii=False),
+                        document_id,
+                    ))
+                else:
+                    conn.execute("""
+                        UPDATE documents
+                        SET status = ?, analysis_result = ?
+                        WHERE document_id = ?
+                    """, (status, json.dumps(analysis_result, ensure_ascii=False), document_id))
             else:
-                conn.execute("""
-                    UPDATE documents SET status = ? WHERE document_id = ?
-                """, (status, document_id))
+                if metadata_updates:
+                    conn.execute("""
+                        UPDATE documents
+                        SET status = ?, metadata = ?
+                        WHERE document_id = ?
+                    """, (
+                        status,
+                        json.dumps(existing_metadata, ensure_ascii=False),
+                        document_id,
+                    ))
+                else:
+                    conn.execute("""
+                        UPDATE documents SET status = ? WHERE document_id = ?
+                    """, (status, document_id))
 
     def _calculate_hash(self, file_path: str) -> str:
         """计算文件SHA256"""
@@ -205,4 +242,17 @@ class DocumentStore:
                 (document_id,)
             )
             row = cursor.fetchone()
-            return dict(row) if row else None
+            if not row:
+                return None
+            result = dict(row)
+            result["metadata"] = self._parse_json_field(result.get("metadata"), {})
+            return result
+
+    def _parse_json_field(self, value: Optional[str], default: Any) -> Any:
+        """解析JSON字段，失败时返回默认值。"""
+        if not value:
+            return default
+        try:
+            return json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return default
