@@ -54,6 +54,7 @@ node_modules/
 
 # Temp
 temp/
+backups/
 
 # Local secrets
 .env

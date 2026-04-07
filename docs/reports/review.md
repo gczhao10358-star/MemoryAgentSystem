@@ -333,7 +333,7 @@ run_uv.bat
 ├── config.yaml                 # 配置文件
 ├── requirements.txt            # 依赖列表
 ├── .python-version             # Python版本指定
-└── review.md                   # 本审查文档
+└── docs/reports/review.md      # 本审查文档
 ```
 
 ---

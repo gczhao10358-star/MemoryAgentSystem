@@ -20,6 +20,20 @@
 
 当前推荐的记忆架构说明见：[docs/memory-architecture.md](./docs/memory-architecture.md)
 
+## 文档导航
+
+- 文档总览：[docs/README.md](./docs/README.md)
+- 架构说明：[docs/memory-architecture.md](./docs/memory-architecture.md)
+- 学习文档：[docs/学习文档.md](./docs/学习文档.md)
+- 面试题库索引：[docs/项目面试题库.md](./docs/项目面试题库.md)
+- 使用指南：[docs/guides/使用指南.md](./docs/guides/使用指南.md)
+- 飞书接入指南：[docs/guides/飞书接入指南.md](./docs/guides/飞书接入指南.md)
+- 前端集成示例：[docs/guides/前端集成示例.md](./docs/guides/前端集成示例.md)
+- 任务执行实现总结：[docs/reports/任务执行功能实现总结.md](./docs/reports/任务执行功能实现总结.md)
+- 测试报告：[docs/reports/TEST_REPORT.md](./docs/reports/TEST_REPORT.md)
+- 评审记录：[docs/reports/review.md](./docs/reports/review.md)
+- 会议文档解析规划：[docs/plans/meeting_document_parser_plan.md](./docs/plans/meeting_document_parser_plan.md)
+
 ## 项目结构
 
 ```
@@ -70,6 +84,7 @@
 ├── main.py                    # 命令行版本入口
 ├── config.yaml                # 配置文件
 ├── requirements.txt           # 依赖列表
+├── scripts/                   # 维护脚本和排障脚本
 ├── start_server.bat           # 服务启动脚本
 ├── tests/                     # 测试文件目录
 └── README.md                  # 说明文档

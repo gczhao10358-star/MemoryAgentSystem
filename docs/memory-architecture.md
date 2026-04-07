@@ -76,3 +76,12 @@
 - 旧配置 `working_memory` / `short_term_memory` 仍兼容
 - 统计字段推荐使用 `session_turns` / `cache_entries`
 - 旧字段 `working_memory_turns` / `short_term_entries` 仍保留用于兼容
+
+## Related Docs
+
+- `docs/README.md`
+  文档总览入口
+- `docs/学习文档.md`
+  偏实现细节和源码学习笔记
+- `docs/项目文档/完整项目文档.md`
+  历史设计与完整项目说明
