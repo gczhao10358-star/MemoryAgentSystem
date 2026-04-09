@@ -1,0 +1,73 @@
+// 全局样式
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #0f172a;
+  color: #f1f5f9;
+}
+
+#app {
+  height: 100%;
+}
+
+// Element Plus 暗黑主题覆盖
+:root {
+  --el-bg-color: #1e293b;
+  --el-bg-color-overlay: #1e293b;
+  --el-text-color-primary: #f1f5f9;
+  --el-text-color-regular: #e2e8f0;
+  --el-text-color-secondary: #94a3b8;
+  --el-border-color: #334155;
+  --el-border-color-light: #475569;
+  --el-fill-color: #334155;
+  --el-fill-color-light: #334155;
+  --el-fill-color-blank: #1e293b;
+}
+
+// 滚动条样式
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1e293b;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #475569;
+  border-radius: 3px;
+
+  &:hover {
+    background: #64748b;
+  }
+}
+
+// Element Plus 组件样式覆盖
+.el-button {
+  transition: all 0.2s ease;
+
+  &:hover {
+    transform: translateY(-1px);
+  }
+}
+
+.el-card {
+  border-radius: 12px;
+  border: 1px solid #334155;
+}
+
+.el-tag {
+  border-radius: 20px;
+}
+
+.el-input__wrapper,
+.el-textarea__inner {
+  border-radius: 8px;
+}

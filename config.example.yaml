@@ -1,0 +1,74 @@
+# 智忆助理配置示例
+# 推荐把敏感信息放进 .env 或系统环境变量，不要提交真实 config.yaml
+
+llm:
+  api_key: "${LLM_API_KEY}"
+  base_url: "${LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
+  model: "${LLM_MODEL:-qwen3.5-flash}"
+  max_tokens: 4096
+  temperature: 0.7
+
+embedding:
+  api_key: "${EMBEDDING_API_KEY:-}"
+  base_url: "${EMBEDDING_BASE_URL:-}"
+  model: "${EMBEDDING_MODEL:-text-embedding-v3}"
+  dimension: 1024
+  batch_size: 32
+
+memory:
+  working_memory:
+    max_turns: 20
+    max_tokens: 4000
+
+  short_term_memory:
+    max_entries: 100
+    ttl_days: 7
+
+  long_term_memory:
+    vector_store:
+      type: "faiss"
+      index_path: "./data/vector_index"
+      dimension: 1024
+
+    metadata_store:
+      type: "sqlite"
+      db_path: "./data/memory.db"
+
+  evolution:
+    decay_rate: 0.05
+    reinforcement_rate: 0.1
+    forget_threshold: 0.15
+    archive_threshold: 0.3
+    core_threshold: 0.8
+    evolution_interval_hours: 24
+
+retrieval:
+  dense:
+    top_k: 50
+    fetch_k: 100
+
+  sparse:
+    top_k: 50
+    use_bm25: true
+
+  rrf:
+    k: 60
+    top_k: 20
+
+  rerank:
+    enabled: true
+    top_m: 10
+
+profile:
+  learning_rate: 0.1
+  batch_learning_threshold: 50
+  min_confidence: 0.3
+
+storage:
+  data_dir: "./data"
+  backup_dir: "./backups"
+  log_dir: "./logs"
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
