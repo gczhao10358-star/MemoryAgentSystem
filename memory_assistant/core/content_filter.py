@@ -1,10 +1,12 @@
 """
 记忆内容过滤策略
-判断哪些内容值得存入持久记忆
+判断哪些内容值得存入持久记忆 — v2.1 增强重要性评分 + 类别推断
 """
 import re
 from typing import Tuple, Optional, List
 from datetime import datetime
+
+from ..models.memory import MemoryCategory
 
 
 class ContentFilter:
@@ -260,36 +262,160 @@ class ContentFilter:
             return "fact"
         return None
 
+    # —————— v2.1 增强：重要性关键词 ——————
+    IMPORTANCE_KEYWORDS = {
+        "identity": ["我叫", "我的名字", "我是", "改名", "称呼我", "我的身份"],
+        "preference": ["喜欢", "讨厌", "最爱", "反感", "厌恶", "不喜欢", "钟情",
+                       "爱好", "兴趣", "热衷", "偏好"],
+        "critical": ["重要", "秘密", "密码", "过敏", "忌口", "紧急", "关键",
+                     "必须", "千万别", "绝对", "一定"],
+        "skill": ["擅长", "精通", "拿手", "不会", "不擅长", "不精通"],
+        "habit": ["习惯", "经常", "总是", "从不", "每次", "一般"],
+        "goal": ["目标", "计划", "打算", "准备", "希望", "梦想"],
+        "relationship": ["家人", "爱人", "对象", "伴侣", "孩子", "父母", "朋友",
+                         "老板", "同事", "同学"],
+    }
+
     @staticmethod
-    def is_valuable(content: str) -> Tuple[bool, Optional[str], float]:
+    def calculate_importance_score(content: str, memory_type: Optional[str] = None) -> float:
+        """
+        计算记忆重要性分数 (0-1)。
+        借鉴 Mnemosyne 的规则打分 + 类别加权。
+        """
+        score = 0.0
+        content = content.strip()
+
+        # 1. 关键词匹配加分
+        for category_keywords in ContentFilter.IMPORTANCE_KEYWORDS.values():
+            for kw in category_keywords:
+                if kw in content:
+                    score += 0.15
+                    break  # 每类最多加一次
+
+        # 2. 包含问句（可能是重要决策记录）
+        if "？" in content or "?" in content:
+            score += 0.05
+
+        # 3. 长度适中（10~100 字符的信息密度最高）
+        if 10 <= len(content) <= 100:
+            score += 0.1
+        elif len(content) > 300:
+            score -= 0.05  # 过长可能是杂乱的上下文
+
+        # 4. 包含量化信息
+        if re.search(r'\d+', content):
+            score += 0.05
+
+        # 5. 类别加权
+        if memory_type:
+            type_weights = {
+                'fact': 0.15,      # 事实通常是核心信息
+                'event': 0.1,      # 事件有时效性
+                'task': 0.05,      # 任务待办
+                'reminder': 0.05,  # 提醒
+            }
+            score += type_weights.get(memory_type, 0.0)
+
+        return min(score, 1.0)
+
+    @staticmethod
+    def infer_category(content: str, memory_type: Optional[str] = None) -> MemoryCategory:
+        """
+        从内容推断记忆类别，决定衰减速率。
+        IDENTITY/PREFERENCE 为常青（不衰减），TEMPORAL 衰减最快。
+        """
+        content = content.strip()
+
+        # 身份信息
+        if ContentFilter._matches_any(content, ContentFilter.IMPORTANCE_KEYWORDS["identity"]):
+            return MemoryCategory.IDENTITY
+
+        # 偏好/习惯
+        if ContentFilter._matches_any(content, ContentFilter.IMPORTANCE_KEYWORDS["preference"]):
+            return MemoryCategory.PREFERENCE
+        if ContentFilter._matches_any(content, ContentFilter.IMPORTANCE_KEYWORDS["habit"]):
+            return MemoryCategory.PREFERENCE
+
+        # 关系信息
+        if ContentFilter._matches_any(content, ContentFilter.IMPORTANCE_KEYWORDS["relationship"]):
+            return MemoryCategory.RELATION
+
+        # 技能/知识
+        if ContentFilter._matches_any(content, ContentFilter.IMPORTANCE_KEYWORDS["skill"]):
+            return MemoryCategory.KNOWLEDGE
+
+        # 目标/计划
+        if ContentFilter._matches_any(content, ContentFilter.IMPORTANCE_KEYWORDS["goal"]):
+            return MemoryCategory.KNOWLEDGE
+
+        # 含时间引用的临时信息
+        if ContentFilter.has_temporal_reference(content):
+            if memory_type in ('task', 'reminder'):
+                return MemoryCategory.TEMPORAL
+            return MemoryCategory.EVENT
+
+        # 默认按类型推断
+        if memory_type == 'fact':
+            # 短事实默认为知识
+            if len(content) < 100:
+                return MemoryCategory.KNOWLEDGE
+            return MemoryCategory.EVENT
+        if memory_type in ('event', 'task', 'reminder'):
+            return MemoryCategory.EVENT
+
+        return MemoryCategory.EVENT
+
+    @staticmethod
+    def is_valuable(content: str) -> Tuple[bool, Optional[str], float, MemoryCategory]:
         """
         判断内容是否值得记忆
 
         Returns:
-            (是否值得记忆, 记忆类型, 重要性分数)
+            (是否值得记忆, 记忆类型, 重要性分数, 记忆类别)
         """
         content = content.strip()
 
+        # 0. 优先排除 LLM 调用失败时产生的错误消息，避免污染记忆库
+        from ..utils.llm_client import is_llm_error_message
+        if is_llm_error_message(content):
+            return False, None, 0.0, MemoryCategory.TEMPORAL
+
         # 1. 首先排除闲聊
         if ContentFilter.is_chitchat(content):
-            return False, None, 0.0
+            return False, None, 0.0, MemoryCategory.TEMPORAL
 
         # 2. 排除查询类
         if ContentFilter.is_query(content):
-            return False, None, 0.0
+            return False, None, 0.0, MemoryCategory.TEMPORAL
 
         memory_type = ContentFilter.classify_memory_type(content)
-        if memory_type == 'event':
-            importance = 0.9 if ContentFilter.is_meeting_notes(content) else 0.8
-            return True, memory_type, importance
-        if memory_type == 'reminder':
-            return True, memory_type, 0.75
-        if memory_type == 'task':
-            return True, memory_type, 0.7
-        if memory_type == 'fact':
-            return True, memory_type, 0.6
+        if not memory_type:
+            return False, None, 0.0, MemoryCategory.TEMPORAL
 
-        return False, None, 0.0
+        # 3. 类别推断
+        category = ContentFilter.infer_category(content, memory_type)
+
+        # 4. 计算重要性分数（规则基础 + 类别加权）
+        importance = ContentFilter.calculate_importance_score(content, memory_type)
+
+        # 5. 类别基础分调整
+        category_base = {
+            MemoryCategory.IDENTITY: 0.85,
+            MemoryCategory.PREFERENCE: 0.80,
+            MemoryCategory.RELATION: 0.70,
+            MemoryCategory.KNOWLEDGE: 0.65,
+            MemoryCategory.EVENT: 0.60,
+            MemoryCategory.TEMPORAL: 0.30,
+        }
+        importance = max(importance, category_base.get(category, 0.5))
+
+        # 6. 会议纪要和提醒特殊加分
+        if memory_type == 'event' and ContentFilter.is_meeting_notes(content):
+            importance = max(importance, 0.90)
+        if memory_type == 'reminder':
+            importance = max(importance, 0.75)
+
+        return True, memory_type, min(importance, 1.0), category
 
     @staticmethod
     def should_store_memory(content: str, context: dict = None) -> Tuple[bool, dict]:
@@ -299,17 +425,21 @@ class ContentFilter:
         Returns:
             (是否存储, 存储元数据)
         """
-        is_valuable, mem_type, importance = ContentFilter.is_valuable(content)
+        is_valuable, mem_type, importance, category = ContentFilter.is_valuable(content)
 
         metadata = {
             'should_store': is_valuable,
             'memory_type': mem_type,
             'importance': importance,
+            'category': category.value if category else MemoryCategory.EVENT.value,
             'filtered_reason': None
         }
 
         if not is_valuable:
-            if ContentFilter.is_chitchat(content):
+            from ..utils.llm_client import is_llm_error_message
+            if is_llm_error_message(content):
+                metadata['filtered_reason'] = 'llm_error'
+            elif ContentFilter.is_chitchat(content):
                 metadata['filtered_reason'] = 'chitchat'
             elif ContentFilter.is_query(content):
                 metadata['filtered_reason'] = 'query'

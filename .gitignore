@@ -58,4 +58,17 @@ backups/
 
 # Local secrets
 .env
+.env.*
+!.env.example
 config.yaml
+
+# Local-only docs archive (kept on disk, not pushed)
+docs_archive_local/
+
+# Frontend build artifacts (rebuild via `npm run build`)
+frontend/dist/
+frontend/node_modules/
+
+# Misc local outputs
+*.tmp
+last_chat_resp.txt

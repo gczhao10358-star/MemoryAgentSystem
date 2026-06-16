@@ -1,6 +1,7 @@
 """
-记忆管理器
-负责用户级会话记忆、近期缓存和持久记忆访问。
+记忆管理器 v2.1
+- 负责用户级会话记忆、近期缓存和持久记忆访问
+- 新增：会话智能压缩 + Memory Flush 机制（借鉴 OpenClaw/Claude Code）
 """
 import asyncio
 from collections import deque
@@ -8,14 +9,23 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Deque, Dict, List, Optional
 
-from ..models.memory import MemoryEntry, MemoryType
+from ..models.memory import (
+    MemoryEntry, MemoryType, MemoryCategory,
+    CATEGORY_HALF_LIFE, EVERGREEN_CATEGORIES
+)
 from ..storage.memory_storage import MemoryStorage
 from ..utils.embedding import EmbeddingModel
 from ..utils.text_processor import text_processor
 from ..utils.time_parser import time_parser
+from .content_filter import ContentFilter
 
 
 DEFAULT_SESSION_KEY = "default"
+
+# 会话压缩阈值：当轮数超过此值时触发压缩
+COMPACTION_TRIGGER_TURNS = 15
+# 压缩后保留最近轮数
+COMPACTION_KEEP_RECENT = 5
 
 
 @dataclass
@@ -370,6 +380,138 @@ class MemoryManager:
         asyncio.create_task(self.durable_memory.store(entry))
         return entry
 
+    async def compact_session(
+        self,
+        user_id: str,
+        session_id: Optional[str] = None,
+        llm_client: Optional[Any] = None,
+    ) -> Optional[str]:
+        """
+        会话智能压缩 — 借鉴 OpenClaw Compaction + Claude Code wU2
+
+        当会话轮数超过阈值时，将早期对话压缩为结构化摘要，
+        保留最近 N 轮不变。压缩前触发 Memory Flush。
+
+        Args:
+            user_id: 用户 ID
+            session_id: 会话 ID
+            llm_client: LLM 客户端（用于生成摘要）
+
+        Returns:
+            压缩后的摘要文本，如果无需压缩则返回 None
+        """
+        history = self.session_memory.get_context(user_id=user_id, session_id=session_id)
+        if len(history) < COMPACTION_TRIGGER_TURNS:
+            return None
+
+        # 保留最近 N 轮不变
+        recent = history[-COMPACTION_KEEP_RECENT:]
+        old = history[:-COMPACTION_KEEP_RECENT]
+
+        # 1. Memory Flush: 在压缩前，从旧对话中提取可能遗漏的重要事实
+        await self._memory_flush(user_id, session_id, old, llm_client)
+
+        if not llm_client:
+            # 无 LLM 时简单截断
+            summary = f"[已压缩 {len(old)} 轮历史对话]"
+        else:
+            # 2. 用 LLM 生成结构化摘要
+            summary = await self._generate_compaction_summary(old, llm_client)
+
+        # 3. 重建会话历史
+        self.session_memory.clear(user_id, session_id)
+        # 注入压缩摘要
+        self.session_memory.add_turn(
+            user_id, session_id, "system",
+            f"[会话压缩摘要] {summary}",
+            f"compact_{datetime.now().strftime('%H%M%S')}"
+        )
+        # 恢复最近轮数
+        for turn in recent:
+            role = turn.get('role', 'user')
+            content = turn.get('content', '')
+            turn_id = turn.get('turn_id')
+            self.session_memory.add_turn(user_id, session_id, role, content, turn_id)
+
+        return summary
+
+    async def _memory_flush(
+        self,
+        user_id: str,
+        session_id: Optional[str],
+        old_history: List[Dict[str, Any]],
+        llm_client: Optional[Any] = None,
+    ):
+        """
+        Memory Flush: 压缩前检查旧对话中是否有遗漏的重要信息需要入库。
+        借鉴 OpenClaw 的设计 — 在 compaction 前提醒 Agent 重要信息即将被丢弃。
+        """
+        # 提取所有用户消息
+        user_messages = [
+            turn.get('content', '')
+            for turn in old_history
+            if turn.get('role') == 'user' and turn.get('content', '').strip()
+        ]
+
+        if not user_messages:
+            return
+
+        # 用 importance score 检查是否有高价值但可能遗漏的消息
+        for msg in user_messages:
+            is_valuable, mem_type, importance, _category = ContentFilter.is_valuable(msg)
+            if is_valuable and importance > 0.6:
+                # 高价值信息未被存储：通过 memorize 补存
+                clean_content, _ = time_parser.extract_time_info(msg)
+                try:
+                    await self.memorize(
+                        content=msg,
+                        user_id=user_id,
+                        memory_type=_memory_type_str_to_enum(mem_type),
+                        source="flush",
+                    )
+                    print(f"[MemoryFlush] 补存遗漏记忆: '{msg[:50]}...' (importance={importance:.2f})")
+                except Exception as e:
+                    print(f"[MemoryFlush] 补存失败: {e}")
+
+    async def _generate_compaction_summary(
+        self,
+        old_history: List[Dict[str, Any]],
+        llm_client: Any,
+    ) -> str:
+        """用 LLM 将旧对话压缩为结构化摘要"""
+        # 构建对话文本
+        dialogue = ""
+        for turn in old_history[-20:]:  # 最多压缩最后 20 轮旧对话
+            role = "用户" if turn.get('role') == 'user' else "助手"
+            content = turn.get('content', '')[:300]  # 截断长内容
+            dialogue += f"{role}: {content}\n"
+
+        prompt = f"""请将以下对话压缩为简短的结构化摘要。
+
+## 对话内容：
+{dialogue}
+
+## 摘要要求：
+请提取并总结：
+1. 用户表达的关键事实/偏好/计划
+2. 做出的决策或得出的结论
+3. 未完成的待办事项或后续行动
+
+用 3-5 句话总结，保持简洁。"""
+
+        try:
+            response = await llm_client.chat([
+                {"role": "system", "content": "你是一个对话摘要专家。"},
+                {"role": "user", "content": prompt}
+            ])
+            from ..utils.llm_client import is_llm_error_message
+            if is_llm_error_message(response):
+                return f"[已压缩 {len(old_history)} 轮历史对话]"
+            return response.strip()
+        except Exception as e:
+            print(f"[Compaction] 摘要生成失败: {e}")
+            return f"[已压缩 {len(old_history)} 轮历史对话]"
+
     async def recall(self,
                      query: str,
                      user_id: str,
@@ -460,11 +602,18 @@ class MemoryManager:
             for memory in cached_memories
             if memory.memory_type != MemoryType.CHAT and memory.memory_id in durable_memory_ids
         )
+        # 类别分布统计
+        category_counts = {}
+        for memory in durable_memories:
+            cat = getattr(memory, 'category', None)
+            cat_val = cat.value if hasattr(cat, 'value') else str(cat)
+            category_counts[cat_val] = category_counts.get(cat_val, 0) + 1
         return {
             "total_memories": len(durable_memories),
             "session_turns": session_turns,
             "cache_entries": cache_entries,
-            # 兼容旧字段，避免前端和脚本立刻失效。
+            "category_distribution": category_counts,
+            # 兼容旧字段
             "working_memory_turns": session_turns,
             "short_term_entries": cache_entries,
             "memory_types": {
@@ -475,3 +624,17 @@ class MemoryManager:
             "avg_confidence": sum(memory.confidence for memory in durable_memories) / len(durable_memories) if durable_memories else 0,
             "avg_importance": sum(memory.importance for memory in durable_memories) / len(durable_memories) if durable_memories else 0,
         }
+
+
+def _memory_type_str_to_enum(type_str: Optional[str]) -> MemoryType:
+    """将记忆类型字符串转换为 MemoryType 枚举"""
+    if not type_str:
+        return MemoryType.FACT
+    mapping = {
+        'fact': MemoryType.FACT,
+        'event': MemoryType.EVENT,
+        'task': MemoryType.TASK,
+        'reminder': MemoryType.REMINDER,
+        'document': MemoryType.DOCUMENT,
+    }
+    return mapping.get(type_str, MemoryType.FACT)

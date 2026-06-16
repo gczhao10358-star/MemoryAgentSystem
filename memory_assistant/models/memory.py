@@ -19,6 +19,16 @@ class MemoryType(Enum):
     REMINDER = "reminder"   # 提醒事项
 
 
+class MemoryCategory(Enum):
+    """记忆类别 — 决定衰减速率和常青属性"""
+    IDENTITY = "identity"       # 身份信息（姓名、职业等），半衰期 180 天
+    PREFERENCE = "preference"   # 偏好/习惯（喜欢、讨厌等），半衰期 180 天
+    KNOWLEDGE = "knowledge"     # 知识/事实（擅长、技能等），半衰期 60 天
+    EVENT = "event"             # 事件记录，半衰期 30 天
+    TEMPORAL = "temporal"       # 临时/琐碎信息，半衰期 14 天
+    RELATION = "relation"       # 关系信息（与某人/某物的关联），半衰期 90 天
+
+
 class MemoryState(Enum):
     """记忆状态"""
     NEW = "new"                     # 新建
@@ -28,6 +38,20 @@ class MemoryState(Enum):
     DECAYING = "decaying"           # 衰退中
     ARCHIVED = "archived"           # 已归档
     FORGOTTEN = "forgotten"         # 已遗忘
+
+
+# 类别对应的半衰期（天）
+CATEGORY_HALF_LIFE: dict = {
+    MemoryCategory.IDENTITY: 180,
+    MemoryCategory.PREFERENCE: 180,
+    MemoryCategory.KNOWLEDGE: 60,
+    MemoryCategory.EVENT: 30,
+    MemoryCategory.TEMPORAL: 14,
+    MemoryCategory.RELATION: 90,
+}
+
+# 常青类别：这些类别的记忆不受时间衰减影响
+EVERGREEN_CATEGORIES = {MemoryCategory.IDENTITY, MemoryCategory.PREFERENCE}
 
 
 @dataclass
@@ -55,6 +79,7 @@ class MemoryEntry:
     weight: float = 0.5             # 当前权重 (0-1)
     access_count: int = 0           # 访问次数
     state: MemoryState = MemoryState.NEW
+    category: MemoryCategory = MemoryCategory.EVENT  # 记忆类别（影响衰减速率）
 
     # 关联属性
     tags: List[str] = field(default_factory=list)
@@ -86,6 +111,7 @@ class MemoryEntry:
             'importance': self.importance,
             'weight': self.weight,
             'access_count': self.access_count,
+            'category': self.category.value,
             'tags': self.tags,
             'related_entities': self.related_entities,
             'source': self.source,
@@ -113,6 +139,10 @@ class MemoryEntry:
         entry.tags = data.get('tags', [])
         entry.related_entities = data.get('related_entities', [])
         entry.source = data.get('source', 'user')
+        try:
+            entry.category = MemoryCategory(data.get('category', 'event'))
+        except (ValueError, KeyError):
+            entry.category = MemoryCategory.EVENT
         entry.metadata = data.get('metadata', {})
 
         # 解析时间

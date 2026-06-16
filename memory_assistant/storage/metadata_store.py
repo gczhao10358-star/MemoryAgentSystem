@@ -7,7 +7,7 @@ import sqlite3
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import List, Dict, Optional, Any
-from ..models.memory import MemoryEntry, MemoryType, MemoryState
+from ..models.memory import MemoryEntry, MemoryType, MemoryState, MemoryCategory
 
 
 class MetadataStore(ABC):
@@ -77,10 +77,17 @@ class SQLiteMetadataStore(MetadataStore):
                 tags TEXT,
                 related_entities TEXT,
                 source TEXT DEFAULT 'user',
+                category TEXT DEFAULT 'event',
                 metadata TEXT,
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         """)
+
+        # 迁移：为旧数据库补充 category 列（v2.1 新增）
+        try:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN category TEXT DEFAULT 'event'")
+        except Exception:
+            pass  # 列已存在，忽略
 
         # 创建用户表
         self.conn.execute("""
@@ -238,13 +245,15 @@ class SQLiteMetadataStore(MetadataStore):
     async def save_memory(self, entry: MemoryEntry) -> bool:
         """保存记忆"""
         try:
+            category_val = getattr(entry, 'category', None)
+            category_str = category_val.value if hasattr(category_val, 'value') else str(category_val or 'event')
             cursor = self.conn.execute("""
                 INSERT INTO memories (
                     memory_id, user_id, content, memory_type, scope, session_id, turn_id, status, state,
                     created_at, updated_at, last_accessed,
                     confidence, importance, weight, access_count,
-                    tags, related_entities, source, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    tags, related_entities, source, category, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 entry.memory_id,
                 entry.user_id,
@@ -265,6 +274,7 @@ class SQLiteMetadataStore(MetadataStore):
                 json.dumps(entry.tags),
                 json.dumps(entry.related_entities),
                 entry.source,
+                category_str,
                 json.dumps(entry.metadata),
             ))
             self.conn.commit()
@@ -325,6 +335,8 @@ class SQLiteMetadataStore(MetadataStore):
     async def update_memory(self, entry: MemoryEntry) -> bool:
         """更新记忆"""
         try:
+            category_val = getattr(entry, 'category', None)
+            category_str = category_val.value if hasattr(category_val, 'value') else str(category_val or 'event')
             cursor = self.conn.execute("""
                 UPDATE memories SET
                     content = ?,
@@ -342,6 +354,7 @@ class SQLiteMetadataStore(MetadataStore):
                     access_count = ?,
                     tags = ?,
                     related_entities = ?,
+                    category = ?,
                     metadata = ?
                 WHERE memory_id = ?
             """, (
@@ -360,6 +373,7 @@ class SQLiteMetadataStore(MetadataStore):
                 entry.access_count,
                 json.dumps(entry.tags),
                 json.dumps(entry.related_entities),
+                category_str,
                 json.dumps(entry.metadata),
                 entry.memory_id,
             ))
@@ -571,6 +585,14 @@ class SQLiteMetadataStore(MetadataStore):
         entry.weight = row['weight']
         entry.access_count = row['access_count']
         entry.source = row['source']
+
+        # 解析类别（v2.1 新增字段，兼容旧数据库无此列）
+        try:
+            category_val = row['category']
+            if category_val:
+                entry.category = MemoryCategory(category_val)
+        except (ValueError, KeyError, IndexError):
+            pass  # 默认值 MemoryCategory.EVENT 已由 dataclass 提供
 
         # 解析时间
         for field_name in ['created_at', 'updated_at', 'last_accessed']:

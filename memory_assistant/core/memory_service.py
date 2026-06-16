@@ -149,6 +149,14 @@ class MemoryService:
                            scope: str = "user",
                            status: str = "active",
                            source: str = "user") -> Dict[str, Any]:
+        # 最终防线：拦截 LLM 错误消息或空内容，避免污染记忆库
+        from ..utils.llm_client import is_llm_error_message
+        if not content or not content.strip():
+            return {"success": False, "filtered_reason": "empty"}
+        if is_llm_error_message(content):
+            print(f"[store_memory] 拒绝存储 LLM 错误消息：{content[:120]}")
+            return {"success": False, "filtered_reason": "llm_error"}
+
         result = await self.memory_crud.create(
             user_id=user_id,
             content=content,

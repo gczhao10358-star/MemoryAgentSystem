@@ -7,6 +7,36 @@ from typing import List, Dict, Optional, AsyncGenerator, Any
 import openai
 
 
+# LLM 调用失败时返回字符串的统一前缀。
+# 业务侧（content_filter / workflow_engine / structured_memory 等）通过 is_llm_error_message
+# 判断是否为错误回复，避免把"抱歉，调用语言模型时出错: ..."这类内容当作有效记忆存入持久化。
+LLM_ERROR_PREFIX = "[LLM_ERROR]"
+LLM_ERROR_FALLBACK_TEXT = "抱歉，调用语言模型时出错"
+
+
+def is_llm_error_message(text: Optional[str]) -> bool:
+    """判断一段文本是否为 LLM 调用失败的兜底消息。"""
+    if not text or not isinstance(text, str):
+        return False
+    snippet = text.lstrip()
+    if snippet.startswith(LLM_ERROR_PREFIX):
+        return True
+    if LLM_ERROR_FALLBACK_TEXT in snippet:
+        return True
+    # OpenAI / 兼容协议常见错误关键字
+    lowered = snippet.lower()
+    if any(k in lowered for k in (
+        "error code: 4",            # 401/403/404 等
+        "error code: 5",            # 5xx
+        "incorrect api key",
+        "invalid_api_key",
+        "rate limit",
+        "connection error",
+    )):
+        return True
+    return False
+
+
 class LLMClient:
     """LLM客户端类"""
 
@@ -58,7 +88,8 @@ class LLMClient:
 
         except Exception as e:
             print(f"Error calling LLM: {e}")
-            return f"抱歉，调用语言模型时出错: {str(e)}"
+            # 带哨兵前缀，便于上游识别并避免把错误信息当成有效内容存入记忆
+            return f"{LLM_ERROR_PREFIX} {LLM_ERROR_FALLBACK_TEXT}: {str(e)}"
 
     async def chat_stream(self,
                          messages: List[Dict[str, str]],
@@ -90,7 +121,7 @@ class LLMClient:
 
         except Exception as e:
             print(f"Error in stream chat: {e}")
-            yield f"抱歉，调用语言模型时出错: {str(e)}"
+            yield f"{LLM_ERROR_PREFIX} {LLM_ERROR_FALLBACK_TEXT}: {str(e)}"
 
     async def generate_with_memory(self,
                                    query: str,

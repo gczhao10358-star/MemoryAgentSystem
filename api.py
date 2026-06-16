@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Any
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Set
 
@@ -26,6 +26,7 @@ from memory_assistant.models.memory import MemoryType
 from memory_assistant.utils.time_parser import time_parser
 from memory_assistant.utils.datetime_tools import get_now
 from memory_assistant.utils.config_loader import load_config
+from memory_assistant.utils import llm_settings
 from datetime import datetime, timedelta
 
 # 全局Agent实例
@@ -165,6 +166,13 @@ async def lifespan(app: FastAPI):
     config = load_config()
     agent = MemoryMateAgent(config)
     await agent.initialize()
+
+    # 应用运行时 LLM 配置（如果存在 data/llm_runtime.json）
+    runtime_data_dir = config.get("storage", {}).get("data_dir", "./data")
+    runtime_settings = llm_settings.load_runtime_settings(runtime_data_dir)
+    if runtime_settings:
+        print(f"[LLM 设置] 应用运行时配置: keys={list(runtime_settings.keys())}")
+        llm_settings.apply_settings_to_agent(agent, runtime_settings)
 
     # 初始化平台管理器
     from memory_assistant.platform.lark_adapter import get_platform_manager
@@ -893,6 +901,59 @@ async def chat(request: ChatRequest):
         return ChatResponse(success=True, data=response, session_id=session_id, turn_id=turn_id)
     except Exception as e:
         return ChatResponse(success=False, error=str(e))
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """
+    流式对话接口（SSE）
+
+    返回事件流，每个事件是一行 `data: {json}\\n\\n`：
+    - {"type":"meta","session_id":"...","turn_id":"..."}
+    - {"type":"chunk","data":"片段文字"}
+    - {"type":"done"}  或 {"type":"error","error":"..."}
+
+    实现说明：当前为\"伪流式\"（先拿完整结果再分片下发），相比一次性返回，
+    用户体感上 token 是逐步出现的；后续可改为真流式 LLM 调用。
+    """
+    async def event_generator():
+        session_id = request.session_id or "default"
+        turn_id = request.turn_id or f"turn_{uuid.uuid4().hex[:12]}"
+        try:
+            await agent.memory_service.create_session(
+                user_id=request.user_id,
+                session_id=session_id,
+            )
+            yield f"data: {json.dumps({'type':'meta','session_id':session_id,'turn_id':turn_id}, ensure_ascii=False)}\n\n"
+
+            full_text = await agent.chat(
+                user_id=request.user_id,
+                message=request.message,
+                stream=False,
+                session_id=session_id,
+                turn_id=turn_id,
+            )
+
+            # 切块下发（按 ~12 字符为一块），让前端有逐字感
+            text = full_text or ""
+            chunk_size = 12
+            for i in range(0, len(text), chunk_size):
+                chunk = text[i:i + chunk_size]
+                yield f"data: {json.dumps({'type':'chunk','data':chunk}, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(0.02)
+
+            yield f"data: {json.dumps({'type':'done'}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type':'error','error':str(e)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/api/sessions", response_model=CreateSessionResponse)
@@ -1685,6 +1746,99 @@ async def delete_memory_endpoint(memory_id: str, user_id: str):
         return {"success": False, "error": str(e)}
 
 
+class BatchDeleteMemoriesRequest(BaseModel):
+    user_id: str
+    memory_ids: List[str]
+
+
+@app.post("/api/memories/batch-delete")
+async def batch_delete_memories(request: BatchDeleteMemoriesRequest):
+    """批量删除记忆。
+
+    - 仅删除属于该 user_id 的记忆，不属于的会被跳过并记入 `skipped`。
+    - 返回 `deleted` 与 `failed` 的数量及详细 ID 列表。
+    """
+    deleted_ids: List[str] = []
+    skipped_ids: List[str] = []
+    failed: List[Dict[str, str]] = []
+
+    for mem_id in request.memory_ids or []:
+        try:
+            mem = await agent.memory_service.read_memory(mem_id)
+            if not mem:
+                failed.append({"memory_id": mem_id, "reason": "not_found"})
+                continue
+            if mem.get('user_id') != request.user_id:
+                skipped_ids.append(mem_id)
+                continue
+            ok = await agent.memory_service.delete_memory(mem_id)
+            if ok:
+                deleted_ids.append(mem_id)
+            else:
+                failed.append({"memory_id": mem_id, "reason": "delete_failed"})
+        except Exception as e:
+            failed.append({"memory_id": mem_id, "reason": str(e)})
+
+    return {
+        "success": True,
+        "deleted": len(deleted_ids),
+        "skipped": len(skipped_ids),
+        "failed": len(failed),
+        "deleted_ids": deleted_ids,
+        "skipped_ids": skipped_ids,
+        "failed_items": failed,
+    }
+
+
+@app.get("/api/users/{user_id}/memories/export")
+async def export_memories(user_id: str, format: str = Query("markdown", regex="^(markdown|json)$")):
+    """导出用户的全部记忆，支持 markdown / json 两种格式。"""
+    try:
+        # 拉所有记忆（默认上限 1000）
+        entries = await agent.memory_crud.storage.metadata_store.get_memories_by_user(
+            user_id=user_id,
+            limit=1000,
+            offset=0,
+        )
+
+        items = []
+        for entry in entries:
+            mtype = entry.memory_type.value if hasattr(entry.memory_type, 'value') else str(entry.memory_type)
+            items.append({
+                "memory_id": entry.memory_id,
+                "memory_type": mtype,
+                "content": entry.content,
+                "importance": entry.importance,
+                "created_at": entry.created_at.isoformat() if entry.created_at else "",
+                "metadata": entry.metadata or {},
+            })
+
+        if format == "json":
+            return {"success": True, "user_id": user_id, "count": len(items), "data": items}
+
+        # markdown
+        lines = [f"# 智忆助理 · 记忆导出（{user_id}）", ""]
+        lines.append(f"导出时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  共 {len(items)} 条\n")
+        # 按类型分组
+        by_type: Dict[str, List[Dict[str, Any]]] = {}
+        for it in items:
+            by_type.setdefault(it['memory_type'], []).append(it)
+        type_names = {
+            'fact': '个人事实', 'event': '日程事件', 'task': '任务',
+            'reminder': '提醒', 'chat': '对话', 'preference': '偏好',
+        }
+        for mtype, lst in by_type.items():
+            lines.append(f"## {type_names.get(mtype, mtype)} ({len(lst)} 条)\n")
+            for it in lst:
+                ts = it['created_at'][:16].replace('T', ' ') if it['created_at'] else ''
+                lines.append(f"- **{ts}** {it['content']}")
+            lines.append("")
+        md = "\n".join(lines)
+        return {"success": True, "user_id": user_id, "count": len(items), "format": "markdown", "data": md}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 @app.post("/api/tasks", response_model=CreateTaskResponse)
 async def create_task(request: CreateTaskRequest):
     """
@@ -2014,6 +2168,121 @@ async def get_lark_status(user_id: str = Query(..., description="用户ID")):
 
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+# ============== LLM 设置接口 ==============
+
+class LLMSettingsResponse(BaseModel):
+    """LLM 配置响应（api_key 已脱敏）"""
+    success: bool
+    data: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+class LLMSettingsRequest(BaseModel):
+    """LLM 配置保存请求。
+
+    所有字段都是可选的；空字符串会被忽略，已有值不会被清空。
+    api_key 字段如果传入掩码（含 ****）也会被忽略，避免误把脱敏字符串当真实 key 保存。
+    """
+    llm_api_key: Optional[str] = Field(None, description="LLM API Key")
+    llm_base_url: Optional[str] = Field(None, description="LLM Base URL")
+    llm_model: Optional[str] = Field(None, description="LLM 模型名")
+    embedding_api_key: Optional[str] = Field(None, description="Embedding API Key")
+    embedding_base_url: Optional[str] = Field(None, description="Embedding Base URL")
+    embedding_model: Optional[str] = Field(None, description="Embedding 模型名")
+    embedding_dimension: Optional[int] = Field(None, description="Embedding 维度")
+
+
+class LLMTestRequest(BaseModel):
+    """LLM 连通性测试请求"""
+    api_key: Optional[str] = Field(None, description="不传则使用当前已保存的 key")
+    base_url: str = Field(..., description="Base URL")
+    model: str = Field(..., description="模型名")
+
+
+def _sanitize_settings_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """把空字符串、纯掩码字符串过滤掉，避免误清空。"""
+    cleaned: Dict[str, Any] = {}
+    for k, v in payload.items():
+        if v is None:
+            continue
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                continue
+            if "****" in v and k.endswith("api_key"):
+                # 用户没改 key，前端回显的是脱敏值
+                continue
+        cleaned[k] = v
+    return cleaned
+
+
+@app.get("/api/settings/llm", response_model=LLMSettingsResponse)
+async def get_llm_settings():
+    """获取当前生效的 LLM 配置（api_key 已脱敏）。"""
+    try:
+        if agent is None:
+            return LLMSettingsResponse(success=False, error="服务尚未初始化完成")
+        return LLMSettingsResponse(
+            success=True,
+            data=llm_settings.current_effective_settings(agent),
+        )
+    except Exception as e:
+        return LLMSettingsResponse(success=False, error=str(e))
+
+
+@app.put("/api/settings/llm", response_model=LLMSettingsResponse)
+async def update_llm_settings(request: LLMSettingsRequest):
+    """保存并立即热应用 LLM 配置（无需重启）。"""
+    try:
+        if agent is None:
+            return LLMSettingsResponse(success=False, error="服务尚未初始化完成")
+
+        cleaned = _sanitize_settings_payload(request.model_dump())
+        if not cleaned:
+            return LLMSettingsResponse(success=False, error="未提供有效字段")
+
+        # 与已有 runtime 文件合并
+        data_dir = (agent.config.get("storage", {}) or {}).get("data_dir", "./data")
+        existing = llm_settings.load_runtime_settings(data_dir)
+        merged = {**existing, **cleaned}
+
+        # 应用到 agent
+        llm_settings.apply_settings_to_agent(agent, merged)
+
+        # 持久化
+        llm_settings.save_runtime_settings(merged, data_dir)
+
+        return LLMSettingsResponse(
+            success=True,
+            data=llm_settings.current_effective_settings(agent),
+        )
+    except Exception as e:
+        return LLMSettingsResponse(success=False, error=str(e))
+
+
+@app.post("/api/settings/llm/test", response_model=LLMSettingsResponse)
+async def test_llm_settings(request: LLMTestRequest):
+    """用给定参数发起一次最小请求测试连通性。"""
+    try:
+        api_key = request.api_key
+        if not api_key or "****" in api_key:
+            # 未提供或为脱敏值时，使用当前 agent 的 key
+            api_key = getattr(getattr(agent, "llm_client", None), "api_key", None) if agent else None
+        if not api_key:
+            return LLMSettingsResponse(success=False, error="缺少 api_key")
+
+        result = await llm_settings.test_llm_connection(
+            api_key=api_key,
+            base_url=request.base_url,
+            model=request.model,
+        )
+        if result.get("success"):
+            return LLMSettingsResponse(success=True, data={"message": result["message"]})
+        return LLMSettingsResponse(success=False, error=result.get("message", "未知错误"))
+    except Exception as e:
+        return LLMSettingsResponse(success=False, error=str(e))
 
 
 # ============== 文档上传相关接口 =============="

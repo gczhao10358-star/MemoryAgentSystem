@@ -13,6 +13,126 @@
       </div>
     </div>
 
+    <!-- 大模型配置 -->
+    <div class="setting-section">
+      <div class="section-header">
+        <h2>大模型 (LLM) 配置</h2>
+        <span :class="['status-badge', llmStatus.configured ? 'enabled' : 'disabled']">
+          {{ llmStatus.configured ? '已配置' : '未配置' }}
+        </span>
+      </div>
+
+      <div class="section-content">
+        <p class="description">
+          配置对话使用的 LLM 服务（兼容 OpenAI 协议，例如 DeepSeek / 阿里云百炼 / OpenAI / 自部署 vLLM 等）。
+          保存后立即生效，无需重启服务。
+        </p>
+
+        <div class="config-form">
+          <h4 class="form-section-title">对话模型</h4>
+
+          <div class="form-group">
+            <label>API Key <span class="required">*</span></label>
+            <input
+              v-model="llmForm.llm_api_key"
+              type="password"
+              :placeholder="llmStatus.configured ? llmStatus.llm_api_key_masked : 'sk-xxxxxxxx'"
+              autocomplete="new-password"
+            />
+            <span class="help">已保存的 Key 会被脱敏；不填则保留当前值。</span>
+          </div>
+
+          <div class="form-group">
+            <label>Base URL <span class="required">*</span></label>
+            <input
+              v-model="llmForm.llm_base_url"
+              type="text"
+              placeholder="https://api.deepseek.com"
+            />
+            <span class="help">OpenAI 兼容接口地址，不需要带 /chat/completions。</span>
+          </div>
+
+          <div class="form-group">
+            <label>Model <span class="required">*</span></label>
+            <input
+              v-model="llmForm.llm_model"
+              type="text"
+              placeholder="deepseek-chat"
+            />
+            <span class="help">如 deepseek-chat、qwen-plus、gpt-4o-mini 等。</span>
+          </div>
+
+          <h4 class="form-section-title">向量嵌入（可选）</h4>
+
+          <div class="form-group">
+            <label>Embedding API Key</label>
+            <input
+              v-model="llmForm.embedding_api_key"
+              type="password"
+              :placeholder="llmStatus.configured ? llmStatus.embedding_api_key_masked : '留空则复用对话模型 Key'"
+              autocomplete="new-password"
+            />
+            <span class="help">不填则与对话模型共用 Key。</span>
+          </div>
+
+          <div class="form-group">
+            <label>Embedding Base URL</label>
+            <input
+              v-model="llmForm.embedding_base_url"
+              type="text"
+              placeholder="留空则复用对话模型 Base URL"
+            />
+          </div>
+
+          <div class="form-group">
+            <label>Embedding Model</label>
+            <input
+              v-model="llmForm.embedding_model"
+              type="text"
+              placeholder="text-embedding-v3"
+            />
+            <span class="help">DeepSeek 暂无嵌入接口；建议改用 DashScope 的 text-embedding-v3。</span>
+          </div>
+
+          <div class="form-group">
+            <label>Embedding 维度</label>
+            <input
+              v-model.number="llmForm.embedding_dimension"
+              type="number"
+              min="64"
+              max="4096"
+              placeholder="1024"
+            />
+            <span class="help">需与所选嵌入模型一致；改了之后老向量索引可能不兼容。</span>
+          </div>
+
+          <div class="form-actions">
+            <button class="btn-primary" :disabled="llmSaving" @click="saveLLMSettings">
+              {{ llmSaving ? '保存中...' : '保存配置' }}
+            </button>
+            <button class="btn-secondary" :disabled="llmTesting" @click="testLLMSettings">
+              {{ llmTesting ? '测试中...' : '测试连接' }}
+            </button>
+          </div>
+        </div>
+
+        <div v-if="llmTestResult" class="test-result" :class="llmTestResult.success ? 'success' : 'error'">
+          {{ llmTestResult.message }}
+        </div>
+
+        <div v-if="llmStatus.configured" class="config-display" style="margin-top: 16px;">
+          <div class="info-row">
+            <span class="label">当前对话模型:</span>
+            <span class="value">{{ llmStatus.llm_model }} @ {{ llmStatus.llm_base_url }}</span>
+          </div>
+          <div class="info-row">
+            <span class="label">当前嵌入模型:</span>
+            <span class="value">{{ llmStatus.embedding_model }} ({{ llmStatus.embedding_dimension }}d)</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- 飞书配置 -->
     <div class="setting-section">
       <div class="section-header">
@@ -169,6 +289,129 @@ const larkConfig = ref({
   receive_id_type: 'open_id'
 })
 
+// 大模型配置
+const llmStatus = ref({
+  configured: false,
+  llm_api_key_masked: '',
+  llm_base_url: '',
+  llm_model: '',
+  embedding_api_key_masked: '',
+  embedding_base_url: '',
+  embedding_model: '',
+  embedding_dimension: 1024
+})
+const llmForm = ref({
+  llm_api_key: '',
+  llm_base_url: '',
+  llm_model: '',
+  embedding_api_key: '',
+  embedding_base_url: '',
+  embedding_model: '',
+  embedding_dimension: null
+})
+const llmSaving = ref(false)
+const llmTesting = ref(false)
+const llmTestResult = ref(null)
+
+async function loadLLMSettings() {
+  try {
+    const res = await fetch(`${API_URL}/api/settings/llm`)
+    const data = await res.json()
+    if (!data.success || !data.data) return
+
+    const llm = data.data.llm || {}
+    const emb = data.data.embedding || {}
+    llmStatus.value = {
+      configured: !!(llm.base_url && llm.model),
+      llm_api_key_masked: llm.api_key || '',
+      llm_base_url: llm.base_url || '',
+      llm_model: llm.model || '',
+      embedding_api_key_masked: emb.api_key || '',
+      embedding_base_url: emb.base_url || '',
+      embedding_model: emb.model || '',
+      embedding_dimension: emb.dimension || 1024
+    }
+    // 把当前值预填到表单（api_key 留空避免覆盖）
+    llmForm.value = {
+      llm_api_key: '',
+      llm_base_url: llm.base_url || '',
+      llm_model: llm.model || '',
+      embedding_api_key: '',
+      embedding_base_url: emb.base_url || '',
+      embedding_model: emb.model || '',
+      embedding_dimension: emb.dimension || null
+    }
+  } catch (e) {
+    console.error('加载 LLM 配置失败:', e)
+  }
+}
+
+async function saveLLMSettings() {
+  if (!llmForm.value.llm_base_url || !llmForm.value.llm_model) {
+    ElMessage.error('Base URL 和 Model 必填')
+    return
+  }
+  llmSaving.value = true
+  llmTestResult.value = null
+  try {
+    // 构造 payload，去掉空值
+    const payload = {}
+    Object.entries(llmForm.value).forEach(([k, v]) => {
+      if (v !== '' && v !== null && v !== undefined) payload[k] = v
+    })
+
+    const res = await fetch(`${API_URL}/api/settings/llm`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    const data = await res.json()
+    if (data.success) {
+      ElMessage.success('配置已保存并生效')
+      await loadLLMSettings()
+    } else {
+      ElMessage.error(data.error || '保存失败')
+    }
+  } catch (e) {
+    ElMessage.error('网络错误')
+  } finally {
+    llmSaving.value = false
+  }
+}
+
+async function testLLMSettings() {
+  if (!llmForm.value.llm_base_url || !llmForm.value.llm_model) {
+    ElMessage.error('Base URL 和 Model 必填')
+    return
+  }
+  llmTesting.value = true
+  llmTestResult.value = null
+  try {
+    const res = await fetch(`${API_URL}/api/settings/llm/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: llmForm.value.llm_api_key || undefined,
+        base_url: llmForm.value.llm_base_url,
+        model: llmForm.value.llm_model
+      })
+    })
+    const data = await res.json()
+    if (data.success) {
+      llmTestResult.value = { success: true, message: data.data?.message || '连接成功' }
+      ElMessage.success('连接成功')
+    } else {
+      llmTestResult.value = { success: false, message: data.error || '连接失败' }
+      ElMessage.error('连接失败')
+    }
+  } catch (e) {
+    llmTestResult.value = { success: false, message: e.message }
+    ElMessage.error('网络错误')
+  } finally {
+    llmTesting.value = false
+  }
+}
+
 // 获取平台状态
 async function loadPlatformStatus() {
   if (!userStore.userId) {
@@ -317,6 +560,7 @@ function formatDate(dateStr) {
 
 onMounted(() => {
   loadPlatformStatus()
+  loadLLMSettings()
 })
 </script>
 
@@ -418,6 +662,20 @@ h1 {
 
 .config-form {
   max-width: 500px;
+}
+
+.form-section-title {
+  margin: 8px 0 16px;
+  padding-bottom: 8px;
+  color: #cfe0f2;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  border-bottom: 1px dashed rgba(127, 156, 191, 0.18);
+}
+
+.form-section-title:not(:first-child) {
+  margin-top: 24px;
 }
 
 .form-group {

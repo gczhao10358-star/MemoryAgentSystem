@@ -48,6 +48,15 @@
           class="memory-card"
           shadow="hover"
         >
+          <button
+            class="delete-btn"
+            :disabled="deletingId === memory.memory_id"
+            title="删除这条记忆"
+            @click.stop="confirmDelete(memory)"
+          >
+            <el-icon><Close /></el-icon>
+          </button>
+
           <div class="memory-header">
             <el-tag :type="getTagType(memory.memory_type)" effect="dark" round>
               {{ getTypeLabel(memory.memory_type) }}
@@ -79,12 +88,14 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import {
-  Collection, Search, StarFilled, Calendar, Lightning
+  Collection, Search, StarFilled, Calendar, Lightning, Close
 } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useMemoryStore } from '@/stores/memory'
 
 const memoryStore = useMemoryStore()
 const searchQuery = ref('')
+const deletingId = ref('')
 
 const filteredMemories = computed(() => {
   let memories = memoryStore.memories.filter(memory => memory.memory_type !== 'chat')
@@ -121,6 +132,37 @@ function formatDate(dateStr) {
 
 function handleSearch() {
   // 本地搜索已在前端实现
+}
+
+async function confirmDelete(memory) {
+  const preview = (memory.content || '').slice(0, 60)
+  try {
+    await ElMessageBox.confirm(
+      `确定删除这条记忆吗？此操作不可恢复。\n\n"${preview}${memory.content && memory.content.length > 60 ? '...' : ''}"`,
+      '删除记忆',
+      {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        confirmButtonClass: 'el-button--danger'
+      }
+    )
+  } catch {
+    // 用户取消
+    return
+  }
+
+  deletingId.value = memory.memory_id
+  try {
+    const result = await memoryStore.deleteMemory(memory.memory_id)
+    if (result.success) {
+      ElMessage.success('记忆已删除')
+    } else {
+      ElMessage.error(result.error || '删除失败')
+    }
+  } finally {
+    deletingId.value = ''
+  }
 }
 
 onMounted(() => {
@@ -246,6 +288,7 @@ onMounted(() => {
   border: 1px solid rgba(127, 156, 191, 0.14);
   transition: all 0.3s ease;
   border-radius: 22px;
+  position: relative;
 
   &:hover {
     border-color: rgba(94, 234, 212, 0.32);
@@ -255,6 +298,7 @@ onMounted(() => {
 
   :deep(.el-card__body) {
     padding: 18px;
+    position: relative;
   }
 }
 
@@ -263,6 +307,7 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 12px;
+  padding-right: 36px; /* 让出右上角 × 按钮的位置 */
 }
 
 .memory-score {
@@ -272,6 +317,42 @@ onMounted(() => {
   .el-icon {
     color: #fbbf24;
     margin-right: 4px;
+  }
+}
+
+/* 卡片右上角的关闭按钮：始终可见，带红色 hover 高亮 */
+.delete-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid rgba(127, 156, 191, 0.22);
+  border-radius: 50%;
+  background: rgba(8, 18, 34, 0.7);
+  color: #9db0c8;
+  cursor: pointer;
+  transition: all 0.18s ease;
+
+  .el-icon {
+    font-size: 14px;
+  }
+
+  &:hover:not(:disabled) {
+    background: rgba(251, 113, 133, 0.18);
+    border-color: rgba(251, 113, 133, 0.55);
+    color: #fb7185;
+    transform: scale(1.06);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
   }
 }
 

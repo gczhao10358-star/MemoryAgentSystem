@@ -116,7 +116,19 @@ export const useUserStore = defineStore('user', () => {
 
     const result = await fetchCurrentUser(userId.value)
     if (!result.success) {
-      logout()
+      // 1. 并发场景：被新请求抢占（stale），认为成功并放行
+      if (result.stale) {
+        return { success: true, data: profile.value || { user_id: userId.value }, stale: true }
+      }
+      // 2. 仅在后端明确告知"用户不存在"时才登出
+      const errMsg = (result.error || '').toString()
+      const isUserMissing = /用户不存在|user not found|404/i.test(errMsg)
+      if (isUserMissing) {
+        logout()
+        return result
+      }
+      // 3. 网络抖动 / 临时错误：保留 userId，按"已登录但画像未加载"放行
+      return { success: true, data: profile.value || { user_id: userId.value } }
     }
     return result
   }

@@ -96,20 +96,24 @@ class MemoryMateAgent:
             learning_rate=self.config.get('profile', {}).get('learning_rate', 0.1)
         )
 
-        # 初始化演化引擎
+        # 初始化演化引擎（v2.1: 注入 LLM 客户端以支持演化决策）
         evolution_config = memory_config.get('evolution', {})
         self.evolution_engine = MemoryEvolutionEngine(
             metadata_store=metadata_store,
             decay_rate=evolution_config.get('decay_rate', 0.05),
             reinforcement_rate=evolution_config.get('reinforcement_rate', 0.1),
             forget_threshold=evolution_config.get('forget_threshold', 0.15),
+            llm_client=self.llm_client,
+            embedding_model=self.embedding_model,
         )
 
-        # 初始化结构化记忆CRUD
+        # 初始化结构化记忆CRUD（v2.1: 注入演化引擎以启用 LLM 演化决策）
         self.memory_crud = MemoryCRUD(
             memory_storage=self.memory_storage,
             embedding_model=self.embedding_model,
-            llm_client=self.llm_client
+            llm_client=self.llm_client,
+            evolution_engine=self.evolution_engine,
+            vector_store=vector_store,
         )
 
         self.memory_service = MemoryService(
@@ -126,6 +130,8 @@ class MemoryMateAgent:
             memory_service=self.memory_service,
             profile_manager=self.profile_manager,
         )
+        # 让 workflow 能反向调用 agent 上的高级能力（_build_system_prompt 等）
+        self.workflow_engine.agent_ref = self
 
         # 初始化精准任务调度器
         self.precise_scheduler = get_precise_scheduler(metadata_store)
@@ -564,6 +570,13 @@ class MemoryMateAgent:
         # 获取当前时间信息
         now = get_now()
 
+        # 预计算相对日期，给出明确的对照，避免 LLM 在"今天/明天/后天"上漂移
+        from datetime import timedelta as _td
+        _today_dt = now['datetime']
+        _yesterday = (_today_dt - _td(days=1)).strftime('%Y-%m-%d')
+        _tomorrow = (_today_dt + _td(days=1)).strftime('%Y-%m-%d')
+        _day_after = (_today_dt + _td(days=2)).strftime('%Y-%m-%d')
+
         prompt_parts = [
             "你是智忆助理(MemoryMate)，一个具备持久记忆和会话上下文能力的AI助手。",
             "你会记住用户的重要信息，并在对话中利用这些记忆提供个性化的帮助。",
@@ -572,6 +585,12 @@ class MemoryMateAgent:
             f"今天是: {now['date']} {now['weekday_name']}",
             f"当前时间: {now['time']}",
             f"年份: {now['year']}年, 月份: {now['month']}月",
+            "",
+            f"【相对日期对照（请严格遵守，不要自行加减天数）】",
+            f"昨天 = {_yesterday}",
+            f"今天 = {now['date']}",
+            f"明天 = {_tomorrow}",
+            f"后天 = {_day_after}",
         ]
 
         # 解析用户消息中的日期引用，帮助理解日期关系

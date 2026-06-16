@@ -96,14 +96,7 @@ class MemoryWorkflowEngine:
         Returns:
             WorkflowContext: 包含处理结果或需要用户确认的信息
         """
-        # 0. 先检查是否是简单问候（预设回复）
-        simple_response = await self._generate_simple_response(message)
-        if simple_response:
-            context = WorkflowContext(user_id, message, current_time, session_id=session_id, turn_id=turn_id)
-            context.result = simple_response
-            return context
-
-        # 1. 识别意图
+        # 1. 识别意图（已移除硬编码"快速回复"，所有消息都走正常工作流，避免误抢答）
         intent, thought, extracted_content = await self._recognize_intent(message)
 
         # 2. 创建上下文
@@ -132,7 +125,7 @@ class MemoryWorkflowEngine:
 
     async def _recognize_intent(self, message: str) -> tuple[IntentType, str, str]:
         """
-        识别用户意图 - 主要由大模型判断
+        识别用户意图 - 高置信度规则前置，未命中再调 LLM。
 
         Returns:
             (intent_type, thought, extracted_content)
@@ -140,14 +133,51 @@ class MemoryWorkflowEngine:
         import re
         import json
 
-        # 只保留最明显的删除规则
-        message_clean = message.strip().lower()
-        delete_patterns = [r'^删除', r'^移除', r'^清空']
-        if any(re.search(p, message_clean) for p in delete_patterns):
-            print(f"[意图识别] 规则匹配 DELETE: '{message[:30]}...'")
+        message_clean = message.strip()
+        message_lower = message_clean.lower()
+
+        # ---------- 规则前置（高置信度场景跳过 LLM，省一次调用）----------
+
+        # 1. 删除类
+        if re.match(r'^(删除|移除|清空|去掉|删掉|忘掉|忘记)', message_clean):
+            print(f"[意图识别|规则] DELETE: '{message[:30]}...'")
             return IntentType.DELETE, "规则匹配：删除记忆", message
 
-        # 其他全部由大模型判断
+        # 2. 提醒类（必须同时含时间词或时间短语）
+        reminder_kw = ['提醒我', '记得提醒', '叫我', '到点叫', '到时叫', '设个提醒',
+                       '设置提醒', '设个闹钟', '定个闹钟', '记得叫']
+        has_reminder_kw = any(kw in message_clean for kw in reminder_kw)
+        if has_reminder_kw:
+            print(f"[意图识别|规则] EXECUTE_TASK: '{message[:30]}...'")
+            return IntentType.EXECUTE_TASK, "规则匹配：包含提醒/闹钟关键词", message
+
+        # 3. 闲聊/问候/能力问询（不需要走 LLM 意图识别）
+        chitchat_patterns = [
+            r'^(你好|您好|hi|hello|嗨|哈喽)[\s!！。.?？]*$',
+            r'^(在吗|在么|在不在)[?？]?$',
+            r'^(谢谢|多谢|感谢|thanks|thank\s*you)[\s!！。.]*$',
+            r'^(再见|拜拜|bye|goodbye)[\s!！。.]*$',
+            r'^(好的|ok|okay|嗯|嗯嗯|好|行)[\s!！。.]*$',
+        ]
+        for p in chitchat_patterns:
+            if re.match(p, message_lower):
+                print(f"[意图识别|规则] CHAT(闲聊): '{message[:30]}...'")
+                return IntentType.CHAT, "规则匹配：闲聊/问候", message
+
+        # 4. 明确的"询问/查询"短句（强信号 → RETRIEVE）
+        retrieve_patterns = [
+            r'(我叫|我的名字|我是谁|我喜欢|我讨厌|我擅长|我的爱好|我的工作)',
+            r'(我哪天|我什么时候|我.*?(几月|几号|几点))',
+            r'(我.*?有什么(安排|计划|事情|任务))',
+            r'(回忆一下|回想一下|查一下|查询一下|搜索一下).*?(我|之前)',
+        ]
+        for p in retrieve_patterns:
+            if re.search(p, message_clean) and ('?' in message_clean or '？' in message_clean
+                                                 or re.search(r'(吗|呢|啥|什么|哪|几)', message_clean)):
+                print(f"[意图识别|规则] RETRIEVE: '{message[:30]}...'")
+                return IntentType.RETRIEVE, "规则匹配：明确询问个人信息", message
+
+        # 其他场景由大模型判断
         system_prompt = """# Role
 你是智忆助理(MemoryMate)的意图识别专家。分析用户输入，判断应该执行以下哪种操作：
 
@@ -244,24 +274,6 @@ class MemoryWorkflowEngine:
         else:
             return IntentType.CHAT, "规则匹配：直接对话", message
 
-    async def _generate_simple_response(self, message: str) -> str:
-        """为简单问候生成回复"""
-        import re
-        message_lower = message.lower().strip()
-
-        # 简单问候的预设回复
-        if re.search(r'你好|您好|^hi$|^hello$', message_lower):
-            return "你好！我是智忆助理，很高兴为你服务。有什么我可以帮你的吗？"
-        elif re.search(r'在吗|在么', message_lower):
-            return "在的！有什么可以帮你的吗？"
-        elif re.search(r'你是什么|你是谁|叫什么|怎么称呼', message_lower):
-            return "我是智忆助理(MemoryMate)，一个具备持久记忆和会话上下文能力的AI助手。我会记住重要信息，为你提供个性化的帮助。"
-        elif re.search(r'你会什么|你能做什么|帮助', message_lower):
-            return "我可以帮你：1) 记录重要信息、计划和待办事项；2) 回答关于你过往记忆的问题；3) 进行日常对话和知识问答。有什么想记录或查询的吗？"
-        else:
-            # 其他简单问候，返回空字符串，让后续流程处理
-            return ""
-
     def _create_chat_workflow(self) -> List[WorkflowStep]:
         """创建工作流：普通聊天"""
         return [
@@ -282,6 +294,7 @@ class MemoryWorkflowEngine:
         return [
             WorkflowStep("calculate_date_range", self._step_calculate_date_range),
             WorkflowStep("search_memories", self._step_search_memories),
+            WorkflowStep("rerank_memories", self._step_rerank_memories),
             WorkflowStep("generate_answer", self._step_generate_answer),
         ]
 
@@ -296,24 +309,88 @@ class MemoryWorkflowEngine:
     # ========== 聊天工作流步骤 ==========
 
     async def _step_chat_generate(self, ctx: WorkflowContext) -> WorkflowContext:
-        """生成普通回复"""
-        system_prompt = """你是智忆助理(MemoryMate)，一个具备持久记忆和会话上下文能力的AI助手。
+        """生成普通回复 — 同时注入用户画像、相关记忆与会话历史，避免\"无记忆感\"。"""
+        agent = getattr(self, 'agent_ref', None)
 
-你的特点：
-1. 你会记住用户告诉你的信息，在后续对话中使用这些信息提供个性化帮助
-2. 你可以帮用户记录日程安排、重要事项、个人偏好等
-3. 你可以回答关于用户过往记忆的问题
-4. 你可以进行日常对话和知识问答
+        system_prompt: Optional[str] = None
+        retrieval_results: list = []
+        pinned_memories: list = []
 
-当用户问你是谁时，请介绍自己是智忆助理(MemoryMate)。
-当用户问你能做什么时，请介绍你的记忆能力和服务功能。
+        # 1) 如果 agent 在线，复用它的高级能力（画像、pinned、检索）
+        if agent is not None:
+            try:
+                profile = await agent.profile_manager.get_profile(ctx.user_id)
 
-请用友好、自然的语气回复。"""
-        response = await self.llm_client.chat([
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": ctx.message}
-        ])
-        ctx.result = response
+                # 检索 top_k 条相关记忆（含语义 + BM25 + RRF）
+                try:
+                    retrieval_results = await agent.retrieval_engine.search(
+                        query=ctx.message,
+                        user_id=ctx.user_id,
+                        top_k=5,
+                    )
+                except Exception as e:
+                    print(f"[chat_generate] retrieval 失败: {e}")
+                    retrieval_results = []
+
+                # 拉取用户置顶/核心信息记忆
+                try:
+                    pinned_memories = await agent.memory_service.get_pinned_memories(ctx.user_id, limit=5)
+                except Exception:
+                    pinned_memories = []
+
+                system_prompt = await agent._build_system_prompt(
+                    profile=profile,
+                    retrieval_results=retrieval_results,
+                    user_message=ctx.message,
+                    pinned_memories=pinned_memories,
+                )
+            except Exception as e:
+                print(f"[chat_generate] 构建增强 system prompt 失败，回退基础版: {e}")
+                system_prompt = None
+
+        # 2) 兜底基础 system prompt（agent 不在或上面失败时）
+        if not system_prompt:
+            today = ctx.current_time.get('date', '')
+            weekday = ctx.current_time.get('weekday_name', '')
+            system_prompt = (
+                "你是智忆助理(MemoryMate)，具备持久记忆和会话上下文能力。\n"
+                f"今天是 {today} {weekday}。\n"
+                "当用户问你是谁时，介绍自己是智忆助理。\n"
+                "请用友好、自然的语气回复。"
+            )
+
+        # 3) 拼会话历史（最近 N 轮），让多轮上下文连贯
+        history_messages: list = []
+        if agent is not None and ctx.session_id:
+            try:
+                ctx_msgs = agent.memory_service.get_session_context(
+                    user_id=ctx.user_id,
+                    session_id=ctx.session_id,
+                    turns=8,
+                )
+                for m in ctx_msgs[-8:]:
+                    role = m.get('role') or 'user'
+                    content = m.get('content') or ''
+                    if role in ('user', 'assistant') and content:
+                        history_messages.append({'role': role, 'content': content})
+            except Exception as e:
+                print(f"[chat_generate] 获取会话上下文失败: {e}")
+
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(history_messages)
+        messages.append({"role": "user", "content": ctx.message})
+
+        try:
+            response = await self.llm_client.chat(messages)
+            from ..utils.llm_client import is_llm_error_message
+            if is_llm_error_message(response):
+                ctx.result = response  # 错误消息原样回显给用户，但不会入库（已有过滤）
+            else:
+                ctx.result = response
+        except Exception as e:
+            print(f"Error in chat_generate: {e}")
+            ctx.result = f"抱歉，回复生成时出现问题：{e}"
+
         return ctx
 
     # ========== 存储工作流步骤 ==========
@@ -350,7 +427,39 @@ class MemoryWorkflowEngine:
         except Exception as e:
             print(f"Error parsing time locally: {e}")
 
+        # 预计算相对日期，避免 LLM 自行加减天数引起漂移
+        _today_dt = datetime.fromisoformat(ctx.current_time['iso'])
+        _date_yesterday = (_today_dt - timedelta(days=1)).strftime('%Y-%m-%d')
+        _date_tomorrow = (_today_dt + timedelta(days=1)).strftime('%Y-%m-%d')
+        _date_day_after = (_today_dt + timedelta(days=2)).strftime('%Y-%m-%d')
+
+        # 预计算本周/下周各星期的具体日期
+        _cur_wd = _today_dt.weekday()  # 周一=0
+        _this_monday = _today_dt - timedelta(days=_cur_wd)
+        _wd_names = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+        _this_week_lines = "\n".join(
+            f"- 本周{_wd_names[i]} = {(_this_monday + timedelta(days=i)).strftime('%Y-%m-%d')}"
+            for i in range(7)
+        )
+        _next_week_lines = "\n".join(
+            f"- 下周{_wd_names[i]} = {(_this_monday + timedelta(days=7 + i)).strftime('%Y-%m-%d')}"
+            for i in range(7)
+        )
+
         prompt = f"""当前日期：{current_date} ({current_weekday})
+
+【相对日期对照表（必须严格遵守，不要自行计算）】
+- 昨天 = {_date_yesterday}
+- 今天 = {current_date}
+- 明天 = {_date_tomorrow}
+- 后天 = {_date_day_after}
+
+【本周对照表】
+{_this_week_lines}
+
+【下周对照表】
+{_next_week_lines}
+
 用户输入："{content}"
 
 请提取事件的时间信息，返回JSON格式：
@@ -362,14 +471,15 @@ class MemoryWorkflowEngine:
 }}
 
 注意：
-1. "明天" = 当前日期 + 1天
-2. "后天" = 当前日期 + 2天
-3. "下周X" = 下个星期X
-4. "15号" = 本月或下月的15号（根据当前日期判断）
-5. **重要**：时间必须包含小时和分钟，如 "16:15"、"09:30"
-6. 如果用户说"16:15"，event_time 必须是 "16:15"
-7. 如果用户说"下午3点半"，event_time 是 "15:30"
-8. 只返回JSON，不要其他文字"""
+1. event_date 必须严格按照上面的对照表填写，不要自行加减天数。
+2. 用户写"周X/星期X/礼拜X"且未带"下周/下下周"前缀时：
+   - 若该日尚未过去（含今天），按【本周对照表】取；
+   - 若该日已经过去，按【下周对照表】取。
+3. **小时必须忠实**：用户写"17点"就是 17:00；写"23点"就是 23:00；不要把 24 小时制的数字再 +12。
+4. 用户写"下午3点半"才转换为 "15:30"；用户写"下午17点"也只能是 17:00（不要变 14:00、29:00）。
+5. event_time 必须是 HH:MM 24 小时制；用户没说具体时刻就填 null。
+6. 节假日名（如"端午节/中秋节/春节"）只是事件主题，不是时间，不要因为节日名调整 event_date 或 event_time。
+7. 只返回JSON，不要其他文字。"""
 
         try:
             response = await self.llm_client.chat([
@@ -398,36 +508,47 @@ class MemoryWorkflowEngine:
         return ctx
 
     async def _step_polish_content(self, ctx: WorkflowContext) -> WorkflowContext:
-        """润色内容，总结成完整句子"""
+        """润色内容，总结成完整句子（必须忠实于原文，不可改写时间或新增信息）"""
         time_info = ctx.get('time_info')
 
-        prompt_parts = ["请润色以下记忆内容，总结成一句完整通顺的话。"]
+        prompt_parts = ["请把下面这条用户消息整理为一句完整通顺的中文记忆。"]
 
         if time_info:
             date_desc = time_info.get('date_description', '')
             event_time = time_info.get('event_time', '')
+            event_date = time_info.get('event_date', '')
+            if event_date:
+                prompt_parts.append(f"已解析日期：{event_date}（请直接采用，不要自行换算）")
             if date_desc:
-                prompt_parts.append(f"日期：{date_desc}")
+                prompt_parts.append(f"日期描述：{date_desc}")
             if event_time:
-                prompt_parts.append(f"时间：{event_time}")
+                prompt_parts.append(f"已解析时间：{event_time}（24小时制，请直接采用）")
 
         # 使用提取的内容（如果没有则使用原始消息）
         content = ctx.get('extracted_content') or ctx.message
         prompt_parts.append(f"\n原始内容：{content}")
-        prompt_parts.append("\n要求：")
-        prompt_parts.append("1. 包含完整的主体（谁）、事件（做什么）")
-        prompt_parts.append("2. 包含具体时间")
-        prompt_parts.append("3. 包含地点（如果有）")
-        prompt_parts.append("4. 一句话总结，简洁明了")
-        prompt_parts.append("\n只返回润色后的句子，不要其他内容。")
+        prompt_parts.append("\n严格要求：")
+        prompt_parts.append("1. 必须忠实于原始内容，保留全部细节（事件、地点、人物、节日名、原因/状态等）。")
+        prompt_parts.append("2. **严禁改写或推断时间数字**：用户写17点就是17:00，写23点就是23:00；如果上面提供了\"已解析时间\"，必须原样使用。")
+        prompt_parts.append("3. **严禁新增用户没有说过的信息**：不要补\"庆祝/为了/由于/因为\"等因果，不要添加\"打算/准备\"等推测语气词。")
+        prompt_parts.append("4. 节日名（如端午节、中秋节、春节）只能照抄，不可当作事件目的或原因。")
+        prompt_parts.append("5. 仅做语序整理和语法补全，不要替换近义词，不要丢失任何用户提到的关键词。")
+        prompt_parts.append("6. 输出一句话；如确需多个分句，最多两个短句，用中文逗号连接。")
+        prompt_parts.append("\n只返回润色后的句子本身，不要任何前后缀、解释或引号。")
 
         try:
             response = await self.llm_client.chat([
-                {"role": "system", "content": "你是内容润色助手。"},
+                {"role": "system", "content": "你是忠实的记忆整理助手：只做语序整理，不改写任何事实细节。"},
                 {"role": "user", "content": "\n".join(prompt_parts)}
             ])
 
             polished = response.strip()
+            # 如果润色调用本身失败，回退到原始消息，避免把错误字符串作为记忆内容入库
+            from ..utils.llm_client import is_llm_error_message
+            if is_llm_error_message(polished):
+                print(f"[polish] LLM 调用失败，回退使用原始内容；error={polished[:120]}")
+                polished = content
+                ctx.set('llm_polish_failed', True)
             ctx.set('polished_content', polished)
 
             # 提取更多元数据
@@ -441,6 +562,7 @@ class MemoryWorkflowEngine:
         except Exception as e:
             print(f"Error polishing content: {e}")
             ctx.set('polished_content', ctx.message)
+            ctx.set('llm_polish_failed', True)
 
         return ctx
 
@@ -513,6 +635,26 @@ class MemoryWorkflowEngine:
         is_personal_attribute = self._is_personal_attribute(content_for_check)
         classified_type = get_memory_type(content_for_check)
 
+        # ★ 入库查重：对于无时间的 fact（如\"我叫山田\"），如果已经存在相似度 >= 0.85 的记忆
+        #   就不要重复落库，避免反复说同一件事产生 N 条相同 fact。
+        if not has_time and is_personal_attribute and self.memory_service is not None:
+            try:
+                existing = await self.memory_service.search_memories(
+                    user_id=ctx.user_id,
+                    query=content_for_check,
+                    top_k=3,
+                    use_personalization=False,
+                )
+                dup = self._find_duplicate(existing, polished)
+                if dup is not None:
+                    dup_id = dup.get('memory_id')
+                    print(f"[去重] 命中相似记忆 {dup_id}，跳过新增")
+                    # 标记为已记（提升 access_count 通过 retrieval_engine 在搜索时已自动做）
+                    ctx.result = f"已记录（与既有记忆相似，已合并到原记忆）：{polished}"
+                    return ctx
+            except Exception as e:
+                print(f"[去重] 查重失败，按新增处理: {e}")
+
         if is_personal_attribute and not has_time:
             target_memory_type = 'fact'
         elif classified_type in {'event', 'task', 'reminder'}:
@@ -577,6 +719,44 @@ class MemoryWorkflowEngine:
         """判断是否为个人属性（无时间的个人特征）"""
         return ContentFilter.is_personal_attribute(message)
 
+    @staticmethod
+    def _find_duplicate(existing: list, new_content: str, threshold: float = 0.85):
+        """在已有记忆中寻找与 new_content 相似度 >= threshold 的条目；
+        - 如果检索结果带有 score >= threshold 直接采纳；
+        - 否则用最朴素的字符 Jaccard 相似度兜底。
+        """
+        if not existing or not new_content:
+            return None
+
+        # 先看检索打分
+        for mem in existing:
+            score = mem.get('score') or mem.get('hybrid_score') or mem.get('similarity')
+            if score is not None:
+                try:
+                    if float(score) >= threshold:
+                        return mem
+                except Exception:
+                    pass
+
+        # 退化为字符级 Jaccard
+        def _norm(s: str) -> set:
+            s = re.sub(r'[\s\W_]+', '', (s or '').lower())
+            return set(s)
+
+        new_set = _norm(new_content)
+        if not new_set:
+            return None
+
+        for mem in existing:
+            mem_set = _norm(mem.get('content', ''))
+            if not mem_set:
+                continue
+            inter = len(new_set & mem_set)
+            union = len(new_set | mem_set)
+            if union > 0 and inter / union >= threshold:
+                return mem
+        return None
+
     async def _update_profile_with_attribute(self, user_id: str, message: str):
         """从个人属性消息中更新用户画像"""
         try:
@@ -602,28 +782,52 @@ class MemoryWorkflowEngine:
     # ========== 检索工作流步骤 ==========
 
     async def _step_calculate_date_range(self, ctx: WorkflowContext) -> WorkflowContext:
-        """计算检索的日期范围"""
+        """计算检索的日期范围。仅在用户提到时间词时才计算；纯实体查询直接跳过。"""
         current_date = ctx.current_time['date']
 
         # 使用提取的内容（如果没有则使用原始消息）
         content = ctx.get('extracted_content') or ctx.message
 
+        # 快速预判：用户消息里是否带任何时间词
+        has_temporal = ContentFilter.has_temporal_reference(content)
+        if not has_temporal:
+            # 纯实体/属性类查询（如"我叫什么名字""我喜欢什么"），不走日期遍历
+            ctx.set('date_range', {'date_description': '无日期约束'})
+            return ctx
+
+        # 预计算相对日期
+        _today_dt = datetime.fromisoformat(ctx.current_time['iso'])
+        _date_yesterday = (_today_dt - timedelta(days=1)).strftime('%Y-%m-%d')
+        _date_tomorrow = (_today_dt + timedelta(days=1)).strftime('%Y-%m-%d')
+        _date_day_after = (_today_dt + timedelta(days=2)).strftime('%Y-%m-%d')
+        _date_7d_ago = (_today_dt - timedelta(days=7)).strftime('%Y-%m-%d')
+
         prompt = f"""当前日期：{current_date}
+
+【相对日期对照表（必须严格遵守，不要自行计算）】
+- 昨天 = {_date_yesterday}
+- 今天 = {current_date}
+- 明天 = {_date_tomorrow}
+- 后天 = {_date_day_after}
+- 7天前 = {_date_7d_ago}
+
 用户查询："{content}"
 
 请分析用户要查询的日期范围，返回JSON格式：
 {{
-    "start_date": "YYYY-MM-DD格式的开始日期",
-    "end_date": "YYYY-MM-DD格式的结束日期",
+    "start_date": "YYYY-MM-DD格式的开始日期，如果用户没问日期则填 null",
+    "end_date": "YYYY-MM-DD格式的结束日期，如果用户没问日期则填 null",
     "date_description": "自然语言描述，如'最近一周'、'3月份'等"
 }}
 
 注意：
-1. "最近" = 过去7天到今天
-2. "这周" = 本周一到周日
-3. "下周" = 下周一到周日
-4. "3月15日" = 仅3月15日当天
-5. "15号" = 本月15号当天
+1. **如果用户的问题与时间/日期无关（如"我叫什么名字"、"我喜欢什么"），start_date/end_date 都填 null。**
+2. start_date / end_date 必须严格按照上面的"相对日期对照表"填写。
+3. "最近" = 7天前 到 今天，即 {_date_7d_ago} 到 {current_date}
+4. "这周" = 本周一到周日
+5. "下周" = 下周一到周日
+6. "3月15日" = 仅3月15日当天
+7. "15号" = 本月15号当天
 
 只返回JSON，不要其他文字。"""
 
@@ -633,43 +837,45 @@ class MemoryWorkflowEngine:
                 {"role": "user", "content": prompt}
             ])
 
+            from ..utils.llm_client import is_llm_error_message
+            if is_llm_error_message(response):
+                # LLM 调用失败 -> 不强加日期范围，让语义检索去匹配
+                ctx.set('date_range', {'date_description': '无日期约束'})
+                return ctx
+
             json_match = re.search(r'\{[\s\S]*\}', response)
             if json_match:
                 date_range = json.loads(json_match.group())
                 ctx.set('date_range', date_range)
 
-                # 验证日期
-                try:
-                    start = datetime.strptime(date_range['start_date'], '%Y-%m-%d')
-                    end = datetime.strptime(date_range['end_date'], '%Y-%m-%d')
-                    ctx.set('start_date', start)
-                    ctx.set('end_date', end)
-                except:
-                    pass
+                # 验证日期，null/空则跳过日期遍历
+                start_raw = date_range.get('start_date')
+                end_raw = date_range.get('end_date')
+                if start_raw and end_raw and start_raw != 'null' and end_raw != 'null':
+                    try:
+                        start = datetime.strptime(start_raw, '%Y-%m-%d')
+                        end = datetime.strptime(end_raw, '%Y-%m-%d')
+                        ctx.set('start_date', start)
+                        ctx.set('end_date', end)
+                    except Exception:
+                        pass
 
         except Exception as e:
             print(f"Error calculating date range: {e}")
-            # 默认最近7天
-            end = datetime.strptime(current_date, '%Y-%m-%d')
-            start = end - timedelta(days=7)
-            ctx.set('start_date', start)
-            ctx.set('end_date', end)
-            ctx.set('date_range', {
-                'start_date': start.strftime('%Y-%m-%d'),
-                'end_date': end.strftime('%Y-%m-%d'),
-                'date_description': '最近一周'
-            })
+            ctx.set('date_range', {'date_description': '无日期约束'})
 
         return ctx
 
     async def _step_search_memories(self, ctx: WorkflowContext) -> WorkflowContext:
-        """搜索记忆"""
+        """搜索记忆。同时覆盖 fact / event / task / reminder 等所有非 chat 类型。"""
         start_date = ctx.get('start_date')
         end_date = ctx.get('end_date')
 
         all_memories = []
+        # 关注的记忆类型：把 fact 也加进来，不要漏掉"我叫XX""我喜欢XX"这类身份/属性记忆
+        memory_types_for_date = ['event', 'task', 'reminder', 'fact']
 
-        # 1. 按日期范围搜索
+        # 1. 仅当用户问了具体时间/日期时才按日期遍历
         if start_date and end_date:
             current = start_date
             while current <= end_date:
@@ -677,19 +883,18 @@ class MemoryWorkflowEngine:
                     memories = await self.memory_service.search_memories_by_date(
                         user_id=ctx.user_id,
                         date_str=current.strftime('%Y-%m-%d'),
-                        memory_types=['event', 'task', 'reminder']
+                        memory_types=memory_types_for_date
                     )
                 else:
                     memories = await self.memory_crud.search_by_date(
                         user_id=ctx.user_id,
                         date_str=current.strftime('%Y-%m-%d'),
-                        memory_types=['event', 'task', 'reminder']
+                        memory_types=memory_types_for_date
                     )
                 all_memories.extend(memories)
                 current += timedelta(days=1)
 
-        # 2. 语义搜索补充
-        # 使用提取的内容进行搜索
+        # 2. 语义/关键字检索（任何情况下都做，是身份类问题的主要召回路径）
         search_query = ctx.get('extracted_content') or ctx.message
         if self.memory_service:
             semantic_results = await self.memory_service.search_memories(
@@ -711,58 +916,186 @@ class MemoryWorkflowEngine:
             if mem['memory_id'] not in seen_ids:
                 all_memories.append(mem)
 
+        # 3. 兜底：如果以上都没召回，直接拉用户最近的非 chat 记忆（让 LLM 自己挑）
+        if not all_memories and self.memory_service:
+            try:
+                recent_entries = await self.memory_crud.storage.metadata_store.get_memories_by_user(
+                    user_id=ctx.user_id,
+                    limit=20,
+                    offset=0,
+                )
+                for entry in recent_entries:
+                    mtype = entry.memory_type.value if hasattr(entry.memory_type, 'value') else str(entry.memory_type)
+                    if mtype == 'chat':
+                        continue
+                    all_memories.append({
+                        'memory_id': entry.memory_id,
+                        'content': entry.content,
+                        'memory_type': mtype,
+                        'metadata': entry.metadata or {},
+                        'importance': entry.importance,
+                        'created_at': entry.created_at.isoformat() if entry.created_at else '',
+                    })
+            except Exception as e:
+                print(f"[retrieve fallback] 拉取最近记忆失败: {e}")
+
         ctx.set('memories', all_memories)
+        return ctx
+
+    async def _step_rerank_memories(self, ctx: WorkflowContext) -> WorkflowContext:
+        """LLM 轻量 rerank：从 top_k 候选中挑出最相关的 5 条，提升 _step_generate_answer 的命中率。
+
+        - 候选 <= 3 条时直接跳过（rerank 没意义）
+        - LLM 失败时不影响主流程，直接保留原序
+        """
+        memories = ctx.get('memories', [])
+        if len(memories) <= 3:
+            return ctx
+
+        # 太多候选时只取前 12 条参与 rerank，避免 prompt 过长
+        candidates = memories[:12]
+
+        query = ctx.get('extracted_content') or ctx.message
+        lines = []
+        for i, mem in enumerate(candidates):
+            content = (mem.get('content') or '').replace('\n', ' ')[:120]
+            mtype = mem.get('memory_type', '')
+            lines.append(f"[{i}] ({mtype}) {content}")
+
+        prompt = (
+            "你是相关性打分助手。下面是若干候选记忆和一个用户查询。\n"
+            "请输出最多 5 个、按相关性从高到低排序的候选索引。\n\n"
+            f"用户查询：\"{query}\"\n\n"
+            "候选记忆：\n" + "\n".join(lines) + "\n\n"
+            "只返回 JSON 数组，例如 [3,0,5]，不要任何额外解释。"
+        )
+
+        try:
+            response = await self.llm_client.chat([
+                {"role": "system", "content": "你是相关性排序助手，只返回 JSON 数组。"},
+                {"role": "user", "content": prompt},
+            ])
+            from ..utils.llm_client import is_llm_error_message
+            if is_llm_error_message(response):
+                return ctx
+
+            json_match = re.search(r'\[[\s\d,，\s]*\]', response)
+            if not json_match:
+                return ctx
+
+            raw = json_match.group().replace('，', ',')
+            indices = json.loads(raw)
+            if not isinstance(indices, list):
+                return ctx
+
+            ranked = []
+            seen = set()
+            for idx in indices:
+                if isinstance(idx, int) and 0 <= idx < len(candidates) and idx not in seen:
+                    ranked.append(candidates[idx])
+                    seen.add(idx)
+                if len(ranked) >= 5:
+                    break
+
+            # 把没参与排序的剩余记忆追加在后面，保留全量信息
+            tail = [m for i, m in enumerate(candidates) if i not in seen]
+            tail += memories[12:]
+
+            if ranked:
+                print(f"[rerank] 重排前 {len(memories)} 条 -> 前 {len(ranked)} 条精选")
+                ctx.set('memories', ranked + tail)
+        except Exception as e:
+            print(f"[rerank] 失败: {e}")
+
         return ctx
 
     async def _step_generate_answer(self, ctx: WorkflowContext) -> WorkflowContext:
         """生成回答"""
         memories = ctx.get('memories', [])
         date_range = ctx.get('date_range', {})
-
-        if not memories:
-            date_desc = date_range.get('date_description', '该时间段')
-            ctx.result = f"{date_desc}没有找到相关安排。"
-            return ctx
-
-        # 构建记忆信息
-        memory_texts = []
-        for i, mem in enumerate(memories[:10], 1):  # 最多10条
-            metadata = mem.get('metadata', {})
-            datetime_str = metadata.get('datetime', '')
-            content = mem.get('content', '')
-            memory_texts.append(f"{i}. {datetime_str}: {content}")
-
-        memories_str = "\n".join(memory_texts)
-        date_desc = date_range.get('date_description', '该时间段')
-
-        # 使用提取的内容
         query_content = ctx.get('extracted_content') or ctx.message
 
-        prompt = f"""根据以下记忆信息，回答用户的查询。
+        # 拉一下用户画像，拼到 prompt 里，便于回答"我叫什么/我喜欢什么"等身份类问题
+        profile_summary = ""
+        if self.profile_manager:
+            try:
+                profile = await self.profile_manager.get_profile(ctx.user_id)
+                parts = []
+                if getattr(profile, 'name', None):
+                    parts.append(f"用户名字：{profile.name}")
+                if getattr(profile, 'username', None) and profile.username != getattr(profile, 'name', None):
+                    parts.append(f"用户名：{profile.username}")
+                top_topics = getattr(profile, 'topic_preferences', None) or []
+                try:
+                    top_topics = sorted(top_topics, key=lambda x: getattr(x, 'weight', 0), reverse=True)[:5]
+                    if top_topics:
+                        parts.append("感兴趣话题：" + ", ".join(getattr(t, 'topic', str(t)) for t in top_topics))
+                except Exception:
+                    pass
+                expertise = getattr(profile, 'expertise_areas', None) or []
+                if expertise:
+                    parts.append("专业领域：" + ", ".join(getattr(e, 'domain', str(e)) for e in expertise[:3]))
+                if parts:
+                    profile_summary = "\n".join(parts)
+            except Exception as e:
+                print(f"[generate_answer] 拉取画像失败: {e}")
 
-用户查询："{query_content}"
-查询范围：{date_desc}
+        # 构造记忆段
+        if memories:
+            memory_texts = []
+            for i, mem in enumerate(memories[:10], 1):
+                metadata = mem.get('metadata', {})
+                datetime_str = metadata.get('datetime', '') or mem.get('created_at', '')
+                content = mem.get('content', '')
+                memory_texts.append(f"{i}. [{datetime_str}] {content}")
+            memories_str = "\n".join(memory_texts)
+        else:
+            memories_str = "（暂无相关记忆）"
 
-记忆信息：
-{memories_str}
+        # 如果用户画像和记忆都没有任何线索，就让 LLM 老实承认不知道（而不是说"没找到安排"）
+        has_any_context = bool(memories) or bool(profile_summary)
 
-要求：
-1. 直接回答用户的问题
-2. 按时间顺序组织信息
-3. 如果没有相关信息，明确说明
-4. 语气友好自然
+        date_desc = date_range.get('date_description', '')
 
-请生成回答："""
+        prompt_parts = [
+            "请根据下面提供的「用户画像」和「相关记忆」回答用户的问题。",
+            "",
+            f"用户问题：\"{query_content}\"",
+        ]
+        if date_desc and date_desc != '无日期约束':
+            prompt_parts.append(f"查询范围：{date_desc}")
+        if profile_summary:
+            prompt_parts.append("\n用户画像：\n" + profile_summary)
+        prompt_parts.append("\n相关记忆：\n" + memories_str)
+        prompt_parts.append("""
+回答要求：
+1. 直接、自然地回答用户的问题，语气友好。
+2. 如果是身份/属性类问题（如"我叫什么"），优先用「用户画像」与含名字/喜好等信息的记忆作答。
+3. 如果是日程/事件类问题，按时间顺序整理「相关记忆」中匹配的内容。
+4. 如果以上信息确实回答不了用户的问题，就坦率地说"暂时没有这条信息"，不要编造，也不要说"该时间段没有安排"这种与问题无关的话。""")
+
+        prompt = "\n".join(prompt_parts)
 
         try:
             response = await self.llm_client.chat([
-                {"role": "system", "content": "你是智忆助理，根据记忆信息回答用户问题。"},
+                {"role": "system", "content": "你是智忆助理，根据用户画像与历史记忆回答用户的问题。"},
                 {"role": "user", "content": prompt}
             ])
-            ctx.result = response.strip()
+            from ..utils.llm_client import is_llm_error_message
+            if is_llm_error_message(response):
+                # LLM 故障时，用画像 + 记忆做最朴素的兜底，避免回那句误导性的"没找到安排"
+                if profile_summary or memories:
+                    ctx.result = "（智能回复暂不可用，以下是你已记录的相关信息）\n" + (profile_summary or "") + ("\n" + memories_str if memories else "")
+                else:
+                    ctx.result = "暂时没有找到相关信息。"
+            else:
+                ctx.result = response.strip()
         except Exception as e:
             print(f"Error generating answer: {e}")
-            ctx.result = f"查询到 {len(memories)} 条记忆，但生成回答时出错。"
+            if has_any_context:
+                ctx.result = "（生成回答时出错，但根据你的记录）\n" + (profile_summary or memories_str)
+            else:
+                ctx.result = "暂时没有找到相关信息。"
 
         return ctx
 
@@ -877,7 +1210,18 @@ class MemoryWorkflowEngine:
         current_date = ctx.current_time['date']
         current_weekday = ctx.current_time['weekday_name']
 
+        # 预计算相对日期
+        _today_dt = datetime.fromisoformat(ctx.current_time['iso'])
+        _date_tomorrow = (_today_dt + timedelta(days=1)).strftime('%Y-%m-%d')
+        _date_day_after = (_today_dt + timedelta(days=2)).strftime('%Y-%m-%d')
+
         prompt = f"""当前日期：{current_date} ({current_weekday})
+
+【相对日期对照表（必须严格遵守，不要自行计算）】
+- 今天 = {current_date}
+- 明天 = {_date_tomorrow}
+- 后天 = {_date_day_after}
+
 用户输入："{content}"
 
 请提取提醒/任务的时间信息，返回JSON格式：
@@ -891,17 +1235,16 @@ class MemoryWorkflowEngine:
 }}
 
 注意：
-1. "明天" = 当前日期 + 1天
-2. "后天" = 当前日期 + 2天
-3. "2分钟后" = 当前时间 + 2分钟，event_date = 今天, event_time = 当前时间+2分钟
-4. "1小时后" = 当前时间 + 1小时，event_date = 今天, event_time = 当前时间+1小时
-5. "每天早上/每天下午" = is_recurring: true, recurring_pattern: "daily"
-6. "每周X" = is_recurring: true, recurring_pattern: "weekly"
-7. **重要**：event_time 必须精确到分钟！如 "16:15"、"09:30"
-8. 如果用户说"16:15"，event_time = "16:15"
-9. 如果用户说"3点半"，event_time = "15:30"
-10. 如果用户说"3点整"，event_time = "15:00"
-11. 只返回JSON，不要其他文字"""
+1. event_date 必须严格按照上面的"相对日期对照表"填写。
+2. "2分钟后" = 当前时间 + 2分钟，event_date = 今天, event_time = 当前时间+2分钟
+3. "1小时后" = 当前时间 + 1小时，event_date = 今天, event_time = 当前时间+1小时
+4. "每天早上/每天下午" = is_recurring: true, recurring_pattern: "daily"
+5. "每周X" = is_recurring: true, recurring_pattern: "weekly"
+6. **重要**：event_time 必须精确到分钟！如 "16:15"、"09:30"
+7. 如果用户说"16:15"，event_time = "16:15"
+8. 如果用户说"3点半"，event_time = "15:30"
+9. 如果用户说"3点整"，event_time = "15:00"
+10. 只返回JSON，不要其他文字"""
 
         try:
             response = await self.llm_client.chat([

@@ -60,7 +60,7 @@ class TimeParser:
         解析自然语言时间为具体时间
 
         Args:
-            text: 自然语言时间描述，如"今天下午3点"、"明天早上"、"3天后"
+            text: 自然语言时间描述，如"今天下午3点"、"明天早上"、"3天后"、"周五下午17点"
             base_time: 基准时间，默认为当前时间
 
         Returns:
@@ -80,6 +80,11 @@ class TimeParser:
 
         # 尝试各种解析模式
         result = None
+
+        # 1a. 解析星期/周X+时间（如"周五下午17点"、"下周一上午9点"）
+        result = self._parse_weekday_datetime(text, base_time)
+        if result:
+            return result
 
         # 1. 解析相对日期+时间
         result = self._parse_relative_datetime(text, base_time)
@@ -153,6 +158,131 @@ class TimeParser:
 
         return None
 
+    # 中文星期对应的 weekday() 数值（周一=0 ... 周日=6）
+    _WEEKDAY_MAP = {
+        '一': 0, '1': 0, '壹': 0,
+        '二': 1, '2': 1, '贰': 1, '两': 1,
+        '三': 2, '3': 2, '叁': 2,
+        '四': 3, '4': 3, '肆': 3,
+        '五': 4, '5': 4, '伍': 4,
+        '六': 5, '6': 5, '陆': 5,
+        '日': 6, '天': 6, '七': 6, '7': 6,
+    }
+
+    def _parse_weekday_datetime(self, text: str, base_time: datetime) -> Optional[datetime]:
+        """解析"(本周|这周|下周|下下周)?周X/星期X/礼拜X (上午|下午|...)? (N点|HH:MM)?"。
+
+        默认语义：未带"本周/下周"前缀时，"周X"指"本周X"；若该日已过则视为"下周X"。
+        """
+        # 优先尝试带前缀（下下周/下周/上周/这周/本周）的匹配
+        prefix_pattern = re.compile(
+            r'(下下周|下周|这周|本周|上周)\s*'
+            r'(?:周|星期|礼拜)?\s*([一二三四五六日天1234567])'
+            r'(?:[\s,，的]*?(早上|早晨|清晨|上午|中午|下午|傍晚|晚上|夜间|深夜))?'
+            r'(?:[\s,，的]*?(\d{1,2}|[一二三四五六七八九十两])\s*(?:[点时])\s*(半|整|\d{1,2})?\s*分?)?'
+            r'(?:[\s,，的]*?(\d{1,2})[:：](\d{2}))?'
+        )
+        # 无前缀匹配（"周X/星期X/礼拜X"）
+        bare_pattern = re.compile(
+            r'(?:周|星期|礼拜)\s*([一二三四五六日天1234567])'
+            r'(?:[\s,，的]*?(早上|早晨|清晨|上午|中午|下午|傍晚|晚上|夜间|深夜))?'
+            r'(?:[\s,，的]*?(\d{1,2}|[一二三四五六七八九十两])\s*(?:[点时])\s*(半|整|\d{1,2})?\s*分?)?'
+            r'(?:[\s,，的]*?(\d{1,2})[:：](\d{2}))?'
+        )
+
+        match = prefix_pattern.search(text)
+        if match:
+            week_offset_word = match.group(1)
+            wd_char = match.group(2)
+            period_word = match.group(3)
+            hour_word = match.group(4)
+            minute_word = match.group(5)
+            colon_hour = match.group(6)
+            colon_minute = match.group(7)
+        else:
+            match = bare_pattern.search(text)
+            if not match:
+                return None
+            week_offset_word = None
+            wd_char = match.group(1)
+            period_word = match.group(2)
+            hour_word = match.group(3)
+            minute_word = match.group(4)
+            colon_hour = match.group(5)
+            colon_minute = match.group(6)
+
+        target_weekday = self._WEEKDAY_MAP.get(wd_char)
+        if target_weekday is None:
+            return None
+
+        # 计算目标日期
+        today = base_time.replace(hour=0, minute=0, second=0, microsecond=0)
+        cur_weekday = today.weekday()
+
+        if week_offset_word == '上周':
+            # 上周对应的同星期
+            base_monday = today - timedelta(days=cur_weekday + 7)
+            target_date = base_monday + timedelta(days=target_weekday)
+        elif week_offset_word == '下周':
+            base_monday = today - timedelta(days=cur_weekday) + timedelta(days=7)
+            target_date = base_monday + timedelta(days=target_weekday)
+        elif week_offset_word == '下下周':
+            base_monday = today - timedelta(days=cur_weekday) + timedelta(days=14)
+            target_date = base_monday + timedelta(days=target_weekday)
+        elif week_offset_word in ('这周', '本周'):
+            base_monday = today - timedelta(days=cur_weekday)
+            target_date = base_monday + timedelta(days=target_weekday)
+        else:
+            # 未带前缀：默认本周；若该日已过则顺延到下周
+            base_monday = today - timedelta(days=cur_weekday)
+            target_date = base_monday + timedelta(days=target_weekday)
+            if target_date < today:
+                target_date = target_date + timedelta(days=7)
+
+        # 解析小时/分钟
+        hour: Optional[int] = None
+        minute: int = 0
+
+        if colon_hour is not None:
+            try:
+                hour = int(colon_hour)
+                minute = int(colon_minute)
+            except (TypeError, ValueError):
+                hour = None
+        elif hour_word is not None:
+            hour = self._parse_number(hour_word)
+            if minute_word:
+                if minute_word == '半':
+                    minute = 30
+                elif minute_word == '整':
+                    minute = 0
+                else:
+                    try:
+                        minute = int(minute_word)
+                    except (TypeError, ValueError):
+                        minute = 0
+
+        # 处理 12 小时制：仅当用户给的小时数 < 12 且明确是下午/晚上/傍晚时，才 +12
+        # 用户写"17点"、"15:30" 等 24h 数字时不要再次 +12
+        if hour is not None and period_word in ('下午', '傍晚', '晚上', '夜间', '深夜'):
+            if hour < 12:
+                hour += 12
+
+        # 如果只有时段（如"下午"）没具体小时，使用时段起始小时
+        if hour is None and period_word:
+            period_key = self.time_keywords.get(period_word)
+            if period_key and period_key in self.time_periods:
+                hour = self.time_periods[period_key][0]
+
+        if hour is None:
+            # 没有任何时间信息，返回当日 00:00（保留日期信息也算成功）
+            return target_date
+
+        if not (0 <= hour <= 23) or not (0 <= minute <= 59):
+            return None
+
+        return target_date.replace(hour=hour, minute=minute)
+
     def _parse_relative_datetime(self, text: str, base_time: datetime) -> Optional[datetime]:
         """解析相对日期+时间，如'今天下午3点'"""
         # 匹配模式：日期 + 时间段/时间点
@@ -185,9 +315,10 @@ class TimeParser:
                 # 解析具体小时
                 if len(groups) > 2 and groups[2]:
                     hour = self._parse_number(groups[2])
-                    if hour and 0 <= hour <= 23:
-                        # 处理下午/晚上时间
-                        if len(groups) > 1 and groups[1] in ['下午', '傍晚', '晚上']:
+                    if hour is not None and 0 <= hour <= 23:
+                        # 处理下午/晚上时间：仅当用户写的是 12 小时制（hour<12）时才 +12
+                        # 用户写"17点"/"23点"等 24 小时制不要再次 +12
+                        if len(groups) > 1 and groups[1] in ['下午', '傍晚', '晚上', '夜间', '深夜']:
                             if hour < 12:
                                 hour += 12
                         result_time = result_time.replace(hour=hour)
